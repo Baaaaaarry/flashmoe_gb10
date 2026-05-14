@@ -1271,6 +1271,10 @@ static void model_summary(const ds4_model *m) {
     uint32_t n_group_used = 0;
     uint64_t tensor_bytes = 0;
     uint64_t params = 0;
+    uint64_t routed_tensor_bytes = 0;
+    uint64_t routed_params = 0;
+    uint64_t shared_tensor_bytes = 0;
+    uint64_t shared_params = 0;
 
     model_get_string(m, "general.name", &name);
     model_get_string(m, "general.architecture", &arch);
@@ -1291,6 +1295,18 @@ static void model_summary(const ds4_model *m) {
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         tensor_bytes += m->tensors[i].bytes;
         params += m->tensors[i].elements;
+        if (ds4_str_ends_with(m->tensors[i].name, ".ffn_gate_exps.weight") ||
+            ds4_str_ends_with(m->tensors[i].name, ".ffn_up_exps.weight") ||
+            ds4_str_ends_with(m->tensors[i].name, ".ffn_down_exps.weight")) {
+            routed_tensor_bytes += m->tensors[i].bytes;
+            routed_params += m->tensors[i].elements;
+        }
+        if (ds4_str_ends_with(m->tensors[i].name, ".ffn_gate_shexp.weight") ||
+            ds4_str_ends_with(m->tensors[i].name, ".ffn_up_shexp.weight") ||
+            ds4_str_ends_with(m->tensors[i].name, ".ffn_down_shexp.weight")) {
+            shared_tensor_bytes += m->tensors[i].bytes;
+            shared_params += m->tensors[i].elements;
+        }
     }
 
     printf("model: %.*s\n", (int)name.len, name.ptr);
@@ -1318,6 +1334,31 @@ static void model_summary(const ds4_model *m) {
     print_size(tensor_bytes);
     printf("\n");
     printf("logical parameters: %.2f B\n", (double)params / 1000000000.0);
+    if (routed_tensor_bytes != 0) {
+        const uint64_t dense_tensor_bytes = tensor_bytes - routed_tensor_bytes;
+        const uint64_t dense_params = params - routed_params;
+        printf("routed experts (quantized): ");
+        print_size(routed_tensor_bytes);
+        printf("  [%.2f B params, bf16-equivalent ", (double)routed_params / 1000000000.0);
+        print_size(routed_params * 2u);
+        printf("]\n");
+        printf("shared experts (quantized): ");
+        print_size(shared_tensor_bytes);
+        printf("  [%.2f B params, bf16-equivalent ", (double)shared_params / 1000000000.0);
+        print_size(shared_params * 2u);
+        printf("]\n");
+        printf("dense/non-routed (quantized): ");
+        print_size(dense_tensor_bytes);
+        printf("  [%.2f B params, bf16-equivalent ", (double)dense_params / 1000000000.0);
+        print_size(dense_params * 2u);
+        printf("]\n");
+        printf("full bf16-equivalent weights: ");
+        print_size(params * 2u);
+        printf("\n");
+        printf("full fp32-equivalent weights: ");
+        print_size(params * 4u);
+        printf("\n");
+    }
 
     printf("tensor types:\n");
     for (uint32_t type = 0; type < sizeof(gguf_types)/sizeof(gguf_types[0]); type++) {
