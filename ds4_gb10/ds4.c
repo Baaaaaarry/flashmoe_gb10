@@ -35,6 +35,7 @@
 #include <unistd.h>
 
 #include "ds4.h"
+#include "flashmoe_backend.h"
 
 #ifndef DS4_NO_GPU
 #include "ds4_gpu.h"
@@ -5272,10 +5273,39 @@ static void layer_topk_selected_experts_from_probs(
 }
 
 static void print_vec_stats(const char *name, const float *x, uint64_t n);
+static void layer_routed_moe_one(
+        float             * out,
+        const ds4_model   * model,
+        const ds4_layer_weights * layer,
+        const float       * x,
+        uint32_t            il,
+        int                 token,
+        float               clamp,
+        bool                trace);
+static void layer_routed_moe_one_prealloc(
+        float             * out,
+        const ds4_model   * model,
+        const ds4_layer_weights * layer,
+        const float       * x,
+        uint32_t            il,
+        int                 token,
+        float               clamp,
+        float              * mid_all,
+        block_q8_K         * xq,
+        block_q8_K         * midq);
+static void layer_routed_moe_batch(
+        float             * moe,
+        const ds4_model   * model,
+        const ds4_layer_weights * layer,
+        const float       * norm,
+        const int         * token_ids,
+        uint32_t            n_tok,
+        uint32_t            il,
+        float               clamp);
 
 /* Single-token routed MoE.  It selects six experts, runs IQ2_XXS gate/up,
  * applies SwiGLU and router weights, then accumulates Q2_K down projections. */
-static void layer_routed_moe_one(
+static void layer_routed_moe_one_native(
         float             * out,
         const ds4_model   * model,
         const ds4_layer_weights * layer,
@@ -5373,7 +5403,7 @@ static void layer_routed_moe_one(
 
 /* Decode version of routed MoE: same math as layer_routed_moe_one(), but all
  * large temporaries come from the persistent scratch arena. */
-static void layer_routed_moe_one_prealloc(
+static void layer_routed_moe_one_prealloc_native(
         float             * out,
         const ds4_model   * model,
         const ds4_layer_weights * layer,
@@ -5423,7 +5453,7 @@ static void layer_routed_moe_one_prealloc(
 
 /* Prefill MoE groups token/expert pairs by expert so each active expert's
  * rows are scanned once for the whole token batch. */
-static void layer_routed_moe_batch(
+static void layer_routed_moe_batch_native(
         float             * moe,
         const ds4_model   * model,
         const ds4_layer_weights * layer,
@@ -5845,7 +5875,7 @@ static void routed_moe_tokens_worker(void *vctx, uint64_t t0, uint64_t t1) {
     block_q8_K *routed_midq = xmalloc((size_t)DS4_N_EXPERT_USED * (ctx->down_in_dim / QK_K) * sizeof(routed_midq[0]));
 
     for (uint64_t t = t0; t < t1; t++) {
-        layer_routed_moe_one_prealloc(ctx->moe + t * DS4_N_EMBD,
+        layer_routed_moe_one_prealloc_native(ctx->moe + t * DS4_N_EMBD,
                                       ctx->model,
                                       ctx->layer,
                                       ctx->norm + t * DS4_N_EMBD,
@@ -5881,6 +5911,53 @@ static void layer_routed_moe_tokens_parallel(
         .il = il,
     };
     ds4_parallel_for_min_rows(n_tok, routed_moe_tokens_worker, &ctx, 1);
+}
+
+static void layer_routed_moe_one(
+        float             * out,
+        const ds4_model   * model,
+        const ds4_layer_weights * layer,
+        const float       * x,
+        uint32_t            il,
+        int                 token,
+        float               clamp,
+        bool                trace) {
+    if (ds4_flashmoe_backend_requested()) {
+        ds4_flashmoe_warn_fallback_once();
+    }
+    layer_routed_moe_one_native(out, model, layer, x, il, token, clamp, trace);
+}
+
+static void layer_routed_moe_one_prealloc(
+        float             * out,
+        const ds4_model   * model,
+        const ds4_layer_weights * layer,
+        const float       * x,
+        uint32_t            il,
+        int                 token,
+        float               clamp,
+        float              * mid_all,
+        block_q8_K         * xq,
+        block_q8_K         * midq) {
+    if (ds4_flashmoe_backend_requested()) {
+        ds4_flashmoe_warn_fallback_once();
+    }
+    layer_routed_moe_one_prealloc_native(out, model, layer, x, il, token, clamp, mid_all, xq, midq);
+}
+
+static void layer_routed_moe_batch(
+        float             * moe,
+        const ds4_model   * model,
+        const ds4_layer_weights * layer,
+        const float       * norm,
+        const int         * token_ids,
+        uint32_t            n_tok,
+        uint32_t            il,
+        float               clamp) {
+    if (ds4_flashmoe_backend_requested()) {
+        ds4_flashmoe_warn_fallback_once();
+    }
+    layer_routed_moe_batch_native(moe, model, layer, norm, token_ids, n_tok, il, clamp);
 }
 
 /* Default prefill FFN path.  HC and shared expert are batched, while routed
