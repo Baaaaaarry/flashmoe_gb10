@@ -14256,6 +14256,9 @@ struct ds4_engine {
     bool quality;
     bool metal_ready;
     bool mtp_ready;
+    ds4_flashmoe_config flashmoe_cfg;
+    ds4_flashmoe_manifest flashmoe_manifest;
+    bool flashmoe_manifest_ready;
 };
 
 static bool cpu_directional_steering_enabled(
@@ -17030,6 +17033,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     e->mtp_model.fd = -1;
     e->backend = opt->backend;
     e->quality = opt->quality;
+    e->flashmoe_cfg = *ds4_flashmoe_config_get();
     e->mtp_draft_tokens = opt->mtp_draft_tokens > 0 ? opt->mtp_draft_tokens : 1;
     if (e->mtp_draft_tokens > 16) e->mtp_draft_tokens = 16;
     e->mtp_margin = opt->mtp_margin >= 0.0f ? opt->mtp_margin : 3.0f;
@@ -17055,6 +17059,39 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     vocab_load(&e->vocab, &e->model);
     config_validate_model(&e->model);
     weights_bind(&e->weights, &e->model);
+    if (ds4_flashmoe_backend_requested()) {
+        if (!ds4_flashmoe_backend_enabled()) {
+            ds4_flashmoe_warn_fallback_once();
+        } else {
+            char ferr[256];
+            if (ds4_flashmoe_manifest_load(e->flashmoe_cfg.manifest_path,
+                                           DS4_N_LAYER,
+                                           DS4_N_EXPERT,
+                                           &e->flashmoe_manifest,
+                                           ferr,
+                                           sizeof(ferr)) != 0) {
+                fprintf(stderr, "ds4: failed to load FlashMoE manifest: %s\n", ferr);
+                ds4_engine_close(e);
+                *out = NULL;
+                return 1;
+            }
+            if (ds4_flashmoe_manifest_validate_files(&e->flashmoe_manifest,
+                                                     ferr,
+                                                     sizeof(ferr)) != 0) {
+                fprintf(stderr, "ds4: invalid FlashMoE manifest files: %s\n", ferr);
+                ds4_engine_close(e);
+                *out = NULL;
+                return 1;
+            }
+            e->flashmoe_manifest_ready = true;
+            fprintf(stderr,
+                    "ds4: FlashMoE manifest loaded: %zu entries across %zu layers (min=%zu max=%zu per layer)\n",
+                    e->flashmoe_manifest.count,
+                    e->flashmoe_manifest.layer_count,
+                    e->flashmoe_manifest.min_entries_per_layer,
+                    e->flashmoe_manifest.max_entries_per_layer);
+        }
+    }
     if (e->backend == DS4_BACKEND_CPU && !cpu_load_directional_steering(e)) {
         ds4_engine_close(e);
         *out = NULL;
@@ -17154,6 +17191,7 @@ void ds4_engine_summary(ds4_engine *e) {
 
 void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
+    ds4_flashmoe_manifest_free(&e->flashmoe_manifest);
     weights_free(&e->weights);
     vocab_free(&e->vocab);
     ds4_threads_shutdown();
