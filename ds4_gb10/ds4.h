@@ -113,6 +113,9 @@ int ds4_engine_collect_imatrix(ds4_engine *e,
                                int ctx_size,
                                int max_prompts,
                                int max_tokens);
+int ds4_engine_export_flashmoe(ds4_engine *e,
+                               const char *expert_root,
+                               const char *manifest_path);
 void ds4_engine_dump_tokens(ds4_engine *e, const ds4_tokens *tokens);
 int ds4_dump_text_tokenization(const char *model_path, const char *text, FILE *fp);
 int ds4_engine_head_test(ds4_engine *e, const ds4_tokens *prompt);

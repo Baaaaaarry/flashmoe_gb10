@@ -15,6 +15,7 @@ typedef struct {
     const char *manifest_path;
     const char *expert_root;
     const char *cache_dir;
+    uint64_t cache_limit_bytes;
     bool warn_fallback;
 } ds4_flashmoe_config;
 
@@ -53,5 +54,17 @@ const ds4_flashmoe_manifest_entry *ds4_flashmoe_manifest_find(
         const ds4_flashmoe_manifest *manifest,
         uint16_t layer_id,
         uint16_t expert_id);
+int ds4_flashmoe_runtime_open(const ds4_flashmoe_manifest *manifest,
+                              uint64_t cache_limit_bytes,
+                              char *err,
+                              size_t errlen);
+void ds4_flashmoe_runtime_close(void);
+bool ds4_flashmoe_runtime_ready(void);
+const uint8_t *ds4_flashmoe_runtime_get_blob(uint16_t layer_id,
+                                             uint16_t expert_id,
+                                             uint64_t expected_size,
+                                             uint64_t *actual_size,
+                                             char *err,
+                                             size_t errlen);
 
 #endif

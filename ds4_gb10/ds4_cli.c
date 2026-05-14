@@ -51,6 +51,8 @@ typedef struct {
     cli_generation_options gen;
     char *prompt_owned;
     bool inspect;
+    const char *flashmoe_export_dir;
+    const char *flashmoe_export_manifest;
 } cli_config;
 
 static volatile sig_atomic_t cli_interrupted;
@@ -151,6 +153,10 @@ static void usage(FILE *fp) {
         "Diagnostics:\n"
         "  --inspect\n"
         "      Load the model and print a summary only.\n"
+        "  --flashmoe-export-dir DIR\n"
+        "      Export routed experts into a FlashMoE pack directory.\n"
+        "  --flashmoe-export-manifest FILE\n"
+        "      Write the FlashMoE routed expert manifest JSON.\n"
         "  --dump-tokens\n"
         "      Tokenize -p/--prompt-file exactly as written, then exit without inference.\n"
         "  --dump-logprobs FILE\n"
@@ -1301,6 +1307,10 @@ static cli_config parse_options(int argc, char **argv) {
             exit(2);
         } else if (!strcmp(arg, "--inspect")) {
             c.inspect = true;
+        } else if (!strcmp(arg, "--flashmoe-export-dir")) {
+            c.flashmoe_export_dir = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--flashmoe-export-manifest")) {
+            c.flashmoe_export_manifest = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--warm-weights")) {
             c.engine.warm_weights = true;
         } else if (!strcmp(arg, "--server")) {
@@ -1315,6 +1325,10 @@ static cli_config parse_options(int argc, char **argv) {
 
     if (c.engine.directional_steering_file && !directional_steering_scale_set) {
         c.engine.directional_steering_ffn = 1.0f;
+    }
+    if ((c.flashmoe_export_dir == NULL) != (c.flashmoe_export_manifest == NULL)) {
+        fprintf(stderr, "ds4: --flashmoe-export-dir and --flashmoe-export-manifest must be used together\n");
+        exit(2);
     }
     if (c.gen.imatrix_output_path && !c.gen.imatrix_dataset_path) {
         fprintf(stderr, "ds4: --imatrix-out requires --imatrix-dataset\n");
@@ -1354,6 +1368,15 @@ int main(int argc, char **argv) {
     int rc = 0;
     if (cfg.inspect) {
         ds4_engine_summary(engine);
+        if (cfg.flashmoe_export_dir) {
+            rc = ds4_engine_export_flashmoe(engine,
+                                            cfg.flashmoe_export_dir,
+                                            cfg.flashmoe_export_manifest);
+        }
+    } else if (cfg.flashmoe_export_dir) {
+        rc = ds4_engine_export_flashmoe(engine,
+                                        cfg.flashmoe_export_dir,
+                                        cfg.flashmoe_export_manifest);
     } else if (cfg.gen.imatrix_output_path) {
         rc = ds4_engine_collect_imatrix(engine,
                                         cfg.gen.imatrix_dataset_path,
