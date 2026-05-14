@@ -1,5 +1,8 @@
 #include "ds4.h"
 #include "linenoise.h"
+#ifndef DS4_NO_GPU
+#include "ds4_gpu.h"
+#endif
 
 /* ds4 CLI.
  *
@@ -20,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -51,9 +55,28 @@ typedef struct {
     cli_generation_options gen;
     char *prompt_owned;
     bool inspect;
+    bool runtime_monitor;
+    float runtime_monitor_interval;
     const char *flashmoe_export_dir;
     const char *flashmoe_export_manifest;
 } cli_config;
+
+typedef struct {
+    bool enabled;
+    float interval_s;
+    volatile int stop;
+    bool started;
+    pthread_t thread;
+    pthread_mutex_t mu;
+    const char *phase;
+    int current;
+    int total;
+    ds4_backend backend;
+} cli_runtime_monitor;
+
+static double cli_now_sec(void);
+
+static cli_runtime_monitor *g_cli_runtime_monitor;
 
 static volatile sig_atomic_t cli_interrupted;
 
@@ -153,6 +176,10 @@ static void usage(FILE *fp) {
         "Diagnostics:\n"
         "  --inspect\n"
         "      Load the model and print a summary only.\n"
+        "  --runtime-monitor\n"
+        "      Print periodic runtime metrics for RSS/HWM, process I/O, CUDA cache, and GPU load.\n"
+        "  --runtime-monitor-interval F\n"
+        "      Runtime monitor sampling interval in seconds. Default: 1.0\n"
         "  --flashmoe-export-dir DIR\n"
         "      Export routed experts into a FlashMoE pack directory.\n"
         "  --flashmoe-export-manifest FILE\n"
@@ -258,6 +285,191 @@ static void log_context_memory(ds4_backend backend, int ctx_size) {
             m.comp_cap);
 }
 
+static uint64_t cli_read_status_kib(const char *key) {
+    FILE *fp = fopen("/proc/self/status", "rb");
+    if (!fp) return 0;
+    char line[256];
+    uint64_t value = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, key, strlen(key)) == 0) {
+            unsigned long long kib = 0;
+            if (sscanf(line + strlen(key), ": %llu kB", &kib) == 1) {
+                value = (uint64_t)kib;
+                break;
+            }
+        }
+    }
+    fclose(fp);
+    return value;
+}
+
+static bool cli_read_proc_io(uint64_t *read_bytes, uint64_t *write_bytes) {
+    FILE *fp = fopen("/proc/self/io", "rb");
+    if (!fp) return false;
+    char line[256];
+    uint64_t r = 0, w = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long long v = 0;
+        if (sscanf(line, "read_bytes: %llu", &v) == 1) r = (uint64_t)v;
+        else if (sscanf(line, "write_bytes: %llu", &v) == 1) w = (uint64_t)v;
+    }
+    fclose(fp);
+    if (read_bytes) *read_bytes = r;
+    if (write_bytes) *write_bytes = w;
+    return true;
+}
+
+static bool cli_query_nvidia_smi(
+        int *gpu_util,
+        int *mem_util,
+        double *mem_used_mb,
+        double *mem_total_mb,
+        double *power_w) {
+    FILE *fp = popen(
+        "nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,power.draw --format=csv,noheader,nounits 2>/dev/null",
+        "r");
+    if (!fp) return false;
+    char line[256];
+    bool ok = false;
+    if (fgets(line, sizeof(line), fp)) {
+        int gu = -1, mu = -1;
+        double used = 0.0, total = 0.0, power = 0.0;
+        if (sscanf(line, " %d , %d , %lf , %lf , %lf", &gu, &mu, &used, &total, &power) == 5 ||
+            sscanf(line, " %d, %d, %lf, %lf, %lf", &gu, &mu, &used, &total, &power) == 5) {
+            if (gpu_util) *gpu_util = gu;
+            if (mem_util) *mem_util = mu;
+            if (mem_used_mb) *mem_used_mb = used;
+            if (mem_total_mb) *mem_total_mb = total;
+            if (power_w) *power_w = power;
+            ok = true;
+        }
+    }
+    (void)pclose(fp);
+    return ok;
+}
+
+static void cli_runtime_monitor_set_phase(cli_runtime_monitor *m, const char *phase) {
+    if (!m || !m->enabled) return;
+    pthread_mutex_lock(&m->mu);
+    m->phase = phase;
+    pthread_mutex_unlock(&m->mu);
+}
+
+static void cli_runtime_monitor_set_progress(cli_runtime_monitor *m, int current, int total) {
+    if (!m || !m->enabled) return;
+    pthread_mutex_lock(&m->mu);
+    m->current = current;
+    m->total = total;
+    pthread_mutex_unlock(&m->mu);
+}
+
+static void *cli_runtime_monitor_main(void *arg) {
+    cli_runtime_monitor *m = arg;
+    uint64_t last_read = 0, last_write = 0;
+    bool have_io = cli_read_proc_io(&last_read, &last_write);
+    double last_t = cli_now_sec();
+    while (!m->stop) {
+        const useconds_t sleep_us = (useconds_t)(m->interval_s > 0.01f ? m->interval_s * 1000000.0f : 1000000.0f);
+        usleep(sleep_us);
+        const double now = cli_now_sec();
+        const double dt = now - last_t > 1.0e-6 ? now - last_t : 1.0;
+        last_t = now;
+
+        const uint64_t rss_kib = cli_read_status_kib("VmRSS");
+        const uint64_t hwm_kib = cli_read_status_kib("VmHWM");
+        uint64_t read_b = 0, write_b = 0;
+        double read_mibs = 0.0, write_mibs = 0.0;
+        if (cli_read_proc_io(&read_b, &write_b)) {
+            if (have_io) {
+                read_mibs = (double)(read_b - last_read) / dt / 1048576.0;
+                write_mibs = (double)(write_b - last_write) / dt / 1048576.0;
+            }
+            have_io = true;
+            last_read = read_b;
+            last_write = write_b;
+        }
+
+        const char *phase = "idle";
+        int current = 0, total = 0;
+        pthread_mutex_lock(&m->mu);
+        if (m->phase) phase = m->phase;
+        current = m->current;
+        total = m->total;
+        pthread_mutex_unlock(&m->mu);
+
+        char cuda_buf[256];
+        cuda_buf[0] = '\0';
+#ifndef DS4_NO_GPU
+        if (m->backend == DS4_BACKEND_CUDA) {
+            ds4_gpu_runtime_stats s;
+            if (ds4_gpu_get_runtime_stats(&s)) {
+                snprintf(cuda_buf,
+                         sizeof(cuda_buf),
+                         " cuda_model=%.2fGiB q8f16=%.2fGiB q8f32=%.2fGiB cuda_free=%.2fGiB cuda_total=%.2fGiB",
+                         (double)s.model_cache_bytes / 1073741824.0,
+                         (double)s.q8_f16_cache_bytes / 1073741824.0,
+                         (double)s.q8_f32_cache_bytes / 1073741824.0,
+                         (double)s.free_bytes / 1073741824.0,
+                         (double)s.total_bytes / 1073741824.0);
+            }
+        }
+#endif
+        char smi_buf[192];
+        smi_buf[0] = '\0';
+        if (m->backend == DS4_BACKEND_CUDA) {
+            int gpu_util = -1, mem_util = -1;
+            double mem_used_mb = 0.0, mem_total_mb = 0.0, power_w = 0.0;
+            if (cli_query_nvidia_smi(&gpu_util, &mem_util, &mem_used_mb, &mem_total_mb, &power_w)) {
+                snprintf(smi_buf,
+                         sizeof(smi_buf),
+                         " gpu_util=%d%% gpu_mem_util=%d%% gpu_mem=%.2f/%.2fGiB power=%.1fW",
+                         gpu_util,
+                         mem_util,
+                         mem_used_mb / 1024.0,
+                         mem_total_mb / 1024.0,
+                         power_w);
+            }
+        }
+
+        fprintf(stderr,
+                "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
+                phase,
+                current,
+                total,
+                (double)rss_kib / 1048576.0,
+                (double)hwm_kib / 1048576.0,
+                read_mibs,
+                write_mibs,
+                cuda_buf,
+                smi_buf);
+    }
+    return NULL;
+}
+
+static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *cfg) {
+    memset(m, 0, sizeof(*m));
+    if (!cfg->runtime_monitor) return;
+    m->enabled = true;
+    m->interval_s = cfg->runtime_monitor_interval > 0.0f ? cfg->runtime_monitor_interval : 1.0f;
+    m->backend = cfg->engine.backend;
+    m->phase = "startup";
+    pthread_mutex_init(&m->mu, NULL);
+    if (pthread_create(&m->thread, NULL, cli_runtime_monitor_main, m) == 0) {
+        m->started = true;
+    } else {
+        pthread_mutex_destroy(&m->mu);
+        memset(m, 0, sizeof(*m));
+    }
+}
+
+static void cli_runtime_monitor_stop(cli_runtime_monitor *m) {
+    if (!m || !m->enabled) return;
+    m->stop = 1;
+    if (m->started) (void)pthread_join(m->thread, NULL);
+    pthread_mutex_destroy(&m->mu);
+    memset(m, 0, sizeof(*m));
+}
+
 static ds4_think_mode cli_effective_think_mode(const cli_generation_options *gen) {
     return ds4_think_mode_for_context(gen->think_mode, gen->ctx_size);
 }
@@ -289,6 +501,7 @@ typedef struct {
     int base_tokens;
     int input_tokens;
     bool use_color;
+    cli_runtime_monitor *monitor;
 } cli_prefill_progress;
 
 static void cli_prefill_progress_cb(void *ud, const char *event, int current, int total) {
@@ -301,6 +514,8 @@ static void cli_prefill_progress_cb(void *ud, const char *event, int current, in
     if (processed > p->input_tokens) processed = p->input_tokens;
     double pct = 100.0 * (double)processed / (double)p->input_tokens;
     if (pct > 100.0) pct = 100.0;
+    cli_runtime_monitor_set_phase(p->monitor, "prefill");
+    cli_runtime_monitor_set_progress(p->monitor, processed, p->input_tokens);
 
     if (p->use_color) {
         fputc('\r', stderr);
@@ -453,6 +668,23 @@ static void print_generated_token(void *ud, int token) {
     free(text);
 }
 
+typedef struct {
+    token_printer *printer;
+    cli_runtime_monitor *monitor;
+    int generated;
+    int max_tokens;
+} cli_emit_wrapper;
+
+static void cli_print_generated_token_monitored(void *ud, int token) {
+    cli_emit_wrapper *w = ud;
+    if (w) w->generated++;
+    if (w && w->monitor) {
+        cli_runtime_monitor_set_phase(w->monitor, "generation");
+        cli_runtime_monitor_set_progress(w->monitor, w->generated, w->max_tokens);
+    }
+    if (w && w->printer) print_generated_token(w->printer, token);
+}
+
 static void build_prompt(ds4_engine *engine, const cli_generation_options *gen, ds4_tokens *out) {
     if (is_rendered_chat_prompt(gen->prompt)) {
         ds4_tokenize_rendered_chat(engine, gen->prompt, out);
@@ -483,6 +715,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
         .base_tokens = 0,
         .input_tokens = prompt->len,
         .use_color = ds4_log_is_tty(stderr),
+        .monitor = g_cli_runtime_monitor,
     };
 
     const double t_prefill0 = cli_now_sec();
@@ -505,6 +738,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const double t_decode0 = cli_now_sec();
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, max_tokens);
     while (generated < max_tokens && !cli_interrupt_requested()) {
         int token = ds4_session_sample(session, cfg->gen.temperature, 0, cfg->gen.top_p, 0.0f, &rng);
         if (token == ds4_token_eos(engine)) break;
@@ -548,6 +783,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
             fflush(stdout);
             free(piece);
             generated++;
+            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+            cli_runtime_monitor_set_progress(g_cli_runtime_monitor, generated, max_tokens);
             if (generated >= max_tokens) break;
         }
         if (stop) break;
@@ -647,6 +884,7 @@ static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4
         .base_tokens = 0,
         .input_tokens = prompt->len,
         .use_color = ds4_log_is_tty(stderr),
+        .monitor = g_cli_runtime_monitor,
     };
     ds4_session_set_progress(session, cli_prefill_progress_cb, &progress);
     if (ds4_session_sync(session, prompt, err, sizeof(err)) != 0) {
@@ -680,6 +918,8 @@ static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4
     int room = ds4_session_ctx(session) - ds4_session_pos(session);
     if (room <= 1) max_tokens = 0;
     else if (max_tokens > room - 1) max_tokens = room - 1;
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, max_tokens);
     for (; generated < max_tokens; generated++) {
         int n = ds4_session_top_logprobs(session, scores, k);
         int token = ds4_session_argmax(session);
@@ -703,6 +943,8 @@ static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4
             ds4_session_free(session);
             return 1;
         }
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+        cli_runtime_monitor_set_progress(g_cli_runtime_monitor, generated + 1, max_tokens);
     }
     fputs("\n  ]\n}\n", fp);
     if (fclose(fp) != 0) {
@@ -775,12 +1017,20 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
             .base_tokens = 0,
             .input_tokens = prompt.len,
             .use_color = ds4_log_is_tty(stderr),
+            .monitor = g_cli_runtime_monitor,
         };
+        cli_emit_wrapper emit = {
+            .printer = &printer,
+            .monitor = g_cli_runtime_monitor,
+            .max_tokens = cfg->gen.n_predict,
+        };
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+        cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, cfg->gen.n_predict);
         rc = ds4_engine_generate_argmax(engine, &prompt, cfg->gen.n_predict,
                                         cfg->gen.ctx_size,
-                                        print_generated_token,
+                                        cli_print_generated_token_monitored,
                                         generation_done,
-                                        &printer,
+                                        &emit,
                                         cli_prefill_progress_cb,
                                         &progress);
     }
@@ -932,6 +1182,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
         .base_tokens = cached,
         .input_tokens = suffix,
         .use_color = ds4_log_is_tty(stderr),
+        .monitor = g_cli_runtime_monitor,
     };
     const double t_prefill0 = cli_now_sec();
     ds4_session_set_progress(chat->session, cli_prefill_progress_cb, &progress);
@@ -962,6 +1213,8 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const double t_decode0 = cli_now_sec();
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, max_tokens);
     while (generated < max_tokens && !cli_interrupt_requested()) {
         int token = ds4_session_sample(chat->session,
                                        cfg->gen.temperature,
@@ -1009,6 +1262,8 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
             fflush(stdout);
             free(piece);
             generated++;
+            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+            cli_runtime_monitor_set_progress(g_cli_runtime_monitor, generated, max_tokens);
             if (generated >= max_tokens) break;
         }
         if (stop) break;
@@ -1307,6 +1562,11 @@ static cli_config parse_options(int argc, char **argv) {
             exit(2);
         } else if (!strcmp(arg, "--inspect")) {
             c.inspect = true;
+        } else if (!strcmp(arg, "--runtime-monitor")) {
+            c.runtime_monitor = true;
+        } else if (!strcmp(arg, "--runtime-monitor-interval")) {
+            c.runtime_monitor = true;
+            c.runtime_monitor_interval = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.05f, 3600.0f);
         } else if (!strcmp(arg, "--flashmoe-export-dir")) {
             c.flashmoe_export_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--flashmoe-export-manifest")) {
@@ -1360,24 +1620,35 @@ int main(int argc, char **argv) {
         log_context_memory(cfg.engine.backend, cfg.gen.ctx_size);
         cli_warn_think_max_downgraded(&cfg.gen, "--think-max");
     }
+    cli_runtime_monitor monitor = {0};
+    cli_runtime_monitor_start(&monitor, &cfg);
+    g_cli_runtime_monitor = &monitor;
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "startup");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, 0);
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) {
+        cli_runtime_monitor_stop(&monitor);
+        g_cli_runtime_monitor = NULL;
         free(cfg.prompt_owned);
         return 1;
     }
     int rc = 0;
     if (cfg.inspect) {
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "inspect");
         ds4_engine_summary(engine);
         if (cfg.flashmoe_export_dir) {
+            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "flashmoe-export");
             rc = ds4_engine_export_flashmoe(engine,
                                             cfg.flashmoe_export_dir,
                                             cfg.flashmoe_export_manifest);
         }
     } else if (cfg.flashmoe_export_dir) {
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "flashmoe-export");
         rc = ds4_engine_export_flashmoe(engine,
                                         cfg.flashmoe_export_dir,
                                         cfg.flashmoe_export_manifest);
     } else if (cfg.gen.imatrix_output_path) {
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "imatrix");
         rc = ds4_engine_collect_imatrix(engine,
                                         cfg.gen.imatrix_dataset_path,
                                         cfg.gen.imatrix_output_path,
@@ -1385,11 +1656,14 @@ int main(int argc, char **argv) {
                                         cfg.gen.imatrix_max_prompts,
                                         cfg.gen.imatrix_max_tokens);
     } else if (cfg.gen.prompt == NULL) {
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "repl");
         rc = run_repl(engine, &cfg);
     } else {
         rc = run_generation(engine, &cfg);
     }
     ds4_engine_close(engine);
+    cli_runtime_monitor_stop(&monitor);
+    g_cli_runtime_monitor = NULL;
     free(cfg.prompt_owned);
     return rc;
 }

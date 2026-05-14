@@ -15,6 +15,14 @@
  */
 typedef struct ds4_gpu_tensor ds4_gpu_tensor;
 
+typedef struct {
+    uint64_t model_cache_bytes;
+    uint64_t q8_f16_cache_bytes;
+    uint64_t q8_f32_cache_bytes;
+    uint64_t free_bytes;
+    uint64_t total_bytes;
+} ds4_gpu_runtime_stats;
+
 int ds4_gpu_init(void);
 void ds4_gpu_cleanup(void);
 
@@ -43,6 +51,7 @@ int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64
 int ds4_gpu_cache_q8_f16_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, uint64_t in_dim, uint64_t out_dim, const char *label);
 void ds4_gpu_set_quality(bool quality);
 void ds4_gpu_print_memory_report(const char *label);
+int ds4_gpu_get_runtime_stats(ds4_gpu_runtime_stats *out);
 
 /* =========================================================================
  * Embeddings and Indexer Helpers.

@@ -1559,6 +1559,23 @@ extern "C" void ds4_gpu_print_memory_report(const char *label) {
             label ? label : "", (double)free_b / 1048576.0, (double)total_b / 1048576.0);
 }
 
+extern "C" int ds4_gpu_get_runtime_stats(ds4_gpu_runtime_stats *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    out->model_cache_bytes = g_model_range_bytes;
+    out->q8_f16_cache_bytes = g_q8_f16_bytes;
+    out->q8_f32_cache_bytes = g_q8_f32_bytes;
+    size_t free_b = 0, total_b = 0;
+    cudaError_t err = cudaMemGetInfo(&free_b, &total_b);
+    if (err != cudaSuccess) {
+        (void)cudaGetLastError();
+        return 0;
+    }
+    out->free_bytes = (uint64_t)free_b;
+    out->total_bytes = (uint64_t)total_b;
+    return 1;
+}
+
 extern "C" void ds4_gpu_set_quality(bool quality) {
     g_quality_mode = quality ? 1 : 0;
     if (g_cublas_ready) {
