@@ -6055,102 +6055,6 @@ static void layer_routed_moe_batch_flashmoe(
     free(selected);
 }
 
-#ifndef DS4_NO_GPU
-static bool metal_graph_decode_routed_flashmoe(
-        ds4_gpu_graph            *g,
-        const ds4_layer_weights  *layer,
-        uint32_t                  il) {
-    const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
-    const uint64_t expert_mid_dim = layer->ffn_gate_exps->dim[1];
-    const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
-    const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
-    float *cpu_ffn_norm = xmalloc((size_t)DS4_N_EMBD * sizeof(cpu_ffn_norm[0]));
-    float *cpu_routed = xmalloc((size_t)DS4_N_EMBD * sizeof(cpu_routed[0]));
-    float *mid_all = xmalloc((size_t)DS4_N_EXPERT_USED * down_in_dim * sizeof(mid_all[0]));
-    block_q8_K *xq = xmalloc((size_t)(expert_in_dim / QK_K) * sizeof(xq[0]));
-    block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (down_in_dim / QK_K) * sizeof(midq[0]));
-    int selected[DS4_N_EXPERT_USED];
-    float expert_weight[DS4_N_EXPERT_USED];
-    bool ok = ds4_gpu_tensor_read(g->ffn_norm, 0, cpu_ffn_norm, (uint64_t)DS4_N_EMBD * sizeof(cpu_ffn_norm[0])) != 0 &&
-              ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) != 0 &&
-              ds4_gpu_tensor_read(g->router_weights, 0, expert_weight, sizeof(expert_weight)) != 0;
-    if (ok) {
-        memset(cpu_routed, 0, (size_t)DS4_N_EMBD * sizeof(cpu_routed[0]));
-        ds4_quantize_row_q8_K(cpu_ffn_norm, xq, (int64_t)expert_in_dim);
-        layer_routed_moe_one_prealloc_flashmoe_selected(cpu_routed,
-                                                        layer,
-                                                        il,
-                                                        selected,
-                                                        expert_weight,
-                                                        DS4_SWIGLU_CLAMP_EXP,
-                                                        mid_all,
-                                                        xq,
-                                                        midq,
-                                                        expert_in_dim,
-                                                        expert_mid_dim,
-                                                        down_in_dim,
-                                                        routed_out_dim);
-        ok = ds4_gpu_tensor_write(g->routed_out, 0, cpu_routed, (uint64_t)DS4_N_EMBD * sizeof(cpu_routed[0])) != 0;
-    }
-    free(midq);
-    free(xq);
-    free(mid_all);
-    free(cpu_routed);
-    free(cpu_ffn_norm);
-    return ok;
-}
-
-static bool metal_graph_prefill_routed_flashmoe(
-        ds4_gpu_graph            *g,
-        const ds4_layer_weights  *layer,
-        uint32_t                  il,
-        uint32_t                  n_tokens) {
-    const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
-    const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
-    float *norm = xmalloc((size_t)n_tokens * DS4_N_EMBD * sizeof(norm[0]));
-    float *moe = xmalloc((size_t)n_tokens * DS4_N_EMBD * sizeof(moe[0]));
-    int *selected = xmalloc((size_t)n_tokens * DS4_N_EXPERT_USED * sizeof(selected[0]));
-    float *weights = xmalloc((size_t)n_tokens * DS4_N_EXPERT_USED * sizeof(weights[0]));
-    bool ok = ds4_gpu_tensor_read(g->batch_ffn_norm, 0, norm, (uint64_t)n_tokens * DS4_N_EMBD * sizeof(norm[0])) != 0 &&
-              ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, (uint64_t)n_tokens * DS4_N_EXPERT_USED * sizeof(selected[0])) != 0 &&
-              ds4_gpu_tensor_read(g->batch_router_weights, 0, weights, (uint64_t)n_tokens * DS4_N_EXPERT_USED * sizeof(weights[0])) != 0;
-    if (ok) {
-        for (uint32_t t = 0; t < n_tokens; t++) {
-            float *mid_all = xmalloc((size_t)DS4_N_EXPERT_USED * down_in_dim * sizeof(mid_all[0]));
-            block_q8_K *xq = xmalloc((size_t)(expert_in_dim / QK_K) * sizeof(xq[0]));
-            block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (down_in_dim / QK_K) * sizeof(midq[0]));
-            memset(moe + (uint64_t)t * DS4_N_EMBD, 0, (size_t)DS4_N_EMBD * sizeof(float));
-            ds4_quantize_row_q8_K(norm + (uint64_t)t * DS4_N_EMBD, xq, (int64_t)expert_in_dim);
-            layer_routed_moe_one_prealloc_flashmoe_selected(moe + (uint64_t)t * DS4_N_EMBD,
-                                                            layer,
-                                                            il,
-                                                            selected + (uint64_t)t * DS4_N_EXPERT_USED,
-                                                            weights + (uint64_t)t * DS4_N_EXPERT_USED,
-                                                            DS4_SWIGLU_CLAMP_EXP,
-                                                            mid_all,
-                                                            xq,
-                                                            midq,
-                                                            expert_in_dim,
-                                                            layer->ffn_gate_exps->dim[1],
-                                                            down_in_dim,
-                                                            layer->ffn_down_exps->dim[1]);
-            free(midq);
-            free(xq);
-            free(mid_all);
-        }
-        ok = ds4_gpu_tensor_write(g->batch_routed_out,
-                                  0,
-                                  moe,
-                                  (uint64_t)n_tokens * DS4_N_EMBD * sizeof(moe[0])) != 0;
-    }
-    free(weights);
-    free(selected);
-    free(moe);
-    free(norm);
-    return ok;
-}
-#endif
-
 static void print_vec_stats(const char *name, const float *x, uint64_t n);
 
 /* Full FFN sublayer for one token: HC pre, RMSNorm, routed MoE, shared expert,
@@ -8857,6 +8761,108 @@ typedef struct {
     bool quality;
     bool mtp_enabled;
 } ds4_gpu_graph;
+
+static bool metal_graph_decode_routed_flashmoe(
+        ds4_gpu_graph          *g,
+        const ds4_layer_weights *layer,
+        uint32_t                il) {
+    float *ffn_norm = xmalloc((size_t)DS4_N_EMBD * sizeof(ffn_norm[0]));
+    float *expert_weight = xmalloc((size_t)DS4_N_EXPERT_USED * sizeof(expert_weight[0]));
+    float *routed_mid = xmalloc((size_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP * sizeof(routed_mid[0]));
+    float *routed_out = xmalloc((size_t)DS4_N_EMBD * sizeof(routed_out[0]));
+    block_q8_K *xq = xmalloc((size_t)(layer->ffn_gate_exps->dim[0] / QK_K) * sizeof(xq[0]));
+    block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (layer->ffn_down_exps->dim[0] / QK_K) * sizeof(midq[0]));
+    int selected[DS4_N_EXPERT_USED];
+    bool ok = false;
+
+    if (!ffn_norm || !expert_weight || !routed_mid || !routed_out || !xq || !midq) goto cleanup;
+    if (ds4_gpu_tensor_read(g->ffn_norm, 0, ffn_norm, (uint64_t)DS4_N_EMBD * sizeof(float)) == 0) goto cleanup;
+    if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
+    if (ds4_gpu_tensor_read(g->router_weights, 0, expert_weight, sizeof(float) * DS4_N_EXPERT_USED) == 0) goto cleanup;
+
+    layer_routed_moe_one_prealloc_flashmoe_selected(routed_out,
+                                                    layer,
+                                                    il,
+                                                    selected,
+                                                    expert_weight,
+                                                    DS4_SWIGLU_CLAMP_EXP,
+                                                    routed_mid,
+                                                    xq,
+                                                    midq,
+                                                    layer->ffn_gate_exps->dim[0],
+                                                    layer->ffn_gate_exps->dim[1],
+                                                    layer->ffn_down_exps->dim[0],
+                                                    layer->ffn_down_exps->dim[1]);
+
+    if (ds4_gpu_tensor_write(g->routed_mid, 0, routed_mid,
+                             (uint64_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP * sizeof(float)) == 0) goto cleanup;
+    if (ds4_gpu_tensor_write(g->routed_out, 0, routed_out,
+                             (uint64_t)DS4_N_EMBD * sizeof(float)) == 0) goto cleanup;
+    ok = true;
+
+cleanup:
+    free(midq);
+    free(xq);
+    free(routed_out);
+    free(routed_mid);
+    free(expert_weight);
+    free(ffn_norm);
+    return ok;
+}
+
+static bool metal_graph_prefill_routed_flashmoe(
+        ds4_gpu_graph          *g,
+        const ds4_layer_weights *layer,
+        uint32_t                il,
+        uint32_t                n_tokens) {
+    const uint64_t norm_elems = (uint64_t)n_tokens * DS4_N_EMBD;
+    const uint64_t selected_elems = (uint64_t)n_tokens * DS4_N_EXPERT_USED;
+    const uint64_t routed_mid_elems = (uint64_t)n_tokens * DS4_N_EXPERT_USED * DS4_N_FF_EXP;
+    float *ffn_norm = xmalloc(norm_elems * sizeof(ffn_norm[0]));
+    int *selected = xmalloc(selected_elems * sizeof(selected[0]));
+    float *expert_weight = xmalloc(selected_elems * sizeof(expert_weight[0]));
+    float *routed_mid = xmalloc(routed_mid_elems * sizeof(routed_mid[0]));
+    float *routed_out = xcalloc((uint64_t)n_tokens * DS4_N_EMBD, sizeof(routed_out[0]));
+    block_q8_K *xq = xmalloc((size_t)(layer->ffn_gate_exps->dim[0] / QK_K) * sizeof(xq[0]));
+    block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (layer->ffn_down_exps->dim[0] / QK_K) * sizeof(midq[0]));
+    bool ok = false;
+
+    if (!ffn_norm || !selected || !expert_weight || !routed_mid || !routed_out || !xq || !midq) goto cleanup;
+    if (ds4_gpu_tensor_read(g->batch_ffn_norm, 0, ffn_norm, norm_elems * sizeof(float)) == 0) goto cleanup;
+    if (ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, selected_elems * sizeof(int)) == 0) goto cleanup;
+    if (ds4_gpu_tensor_read(g->batch_router_weights, 0, expert_weight, selected_elems * sizeof(float)) == 0) goto cleanup;
+
+    for (uint32_t t = 0; t < n_tokens; t++) {
+        layer_routed_moe_one_prealloc_flashmoe_selected(routed_out + (uint64_t)t * DS4_N_EMBD,
+                                                        layer,
+                                                        il,
+                                                        selected + (uint64_t)t * DS4_N_EXPERT_USED,
+                                                        expert_weight + (uint64_t)t * DS4_N_EXPERT_USED,
+                                                        DS4_SWIGLU_CLAMP_EXP,
+                                                        routed_mid + (uint64_t)t * DS4_N_EXPERT_USED * DS4_N_FF_EXP,
+                                                        xq,
+                                                        midq,
+                                                        layer->ffn_gate_exps->dim[0],
+                                                        layer->ffn_gate_exps->dim[1],
+                                                        layer->ffn_down_exps->dim[0],
+                                                        layer->ffn_down_exps->dim[1]);
+    }
+
+    if (ds4_gpu_tensor_write(g->batch_routed_mid, 0, routed_mid, routed_mid_elems * sizeof(float)) == 0) goto cleanup;
+    if (ds4_gpu_tensor_write(g->batch_routed_out, 0, routed_out,
+                             (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float)) == 0) goto cleanup;
+    ok = true;
+
+cleanup:
+    free(midq);
+    free(xq);
+    free(routed_out);
+    free(routed_mid);
+    free(expert_weight);
+    free(selected);
+    free(ffn_norm);
+    return ok;
+}
 
 /* Release every Metal tensor owned by the whole-model graph runtime. */
 static void metal_graph_free(ds4_gpu_graph *g) {
