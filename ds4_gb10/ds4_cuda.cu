@@ -9761,17 +9761,15 @@ __global__ static void moe_down_f32_kernel(
     if (threadIdx.x == 0) down_out[(uint64_t)pair * out_dim + row] = partial[0];
 }
 
-static int routed_moe_launch(
+static int routed_moe_launch_core(
         ds4_gpu_tensor *out,
         ds4_gpu_tensor *gate,
         ds4_gpu_tensor *up,
         ds4_gpu_tensor *mid,
         ds4_gpu_tensor *down,
-        const void *model_map,
-        uint64_t model_size,
-        uint64_t gate_offset,
-        uint64_t up_offset,
-        uint64_t down_offset,
+        const char *gate_w,
+        const char *up_w,
+        const char *down_w,
         uint32_t gate_type,
         uint32_t down_type,
         uint64_t gate_expert_bytes,
@@ -9787,10 +9785,10 @@ static int routed_moe_launch(
         float clamp,
         const ds4_gpu_tensor *x,
         uint32_t n_tokens) {
-    if (!out || !gate || !up || !mid || !down || !model_map || !selected || !weights || !x ||
+    if (!out || !gate || !up || !mid || !down || !gate_w || !up_w || !down_w ||
+        !selected || !weights || !x ||
         n_tokens == 0 || n_expert == 0 ||
         expert_in_dim % CUDA_QK_K != 0 || expert_mid_dim % CUDA_QK_K != 0 ||
-        gate_offset > model_size || up_offset > model_size || down_offset > model_size ||
         x->bytes < (uint64_t)n_tokens * expert_in_dim * sizeof(float) ||
         selected->bytes < (uint64_t)n_tokens * n_expert * sizeof(int32_t) ||
         weights->bytes < (uint64_t)n_tokens * n_expert * sizeof(float) ||
@@ -9804,17 +9802,6 @@ static int routed_moe_launch(
     const int q4k_path = (gate_type == 12u && down_type == 12u);
     if (!q4k_path && (gate_type != 16u || down_type != 10u)) return 0;
     if (q4k_path && (n_tokens != 1u || n_expert != 6u)) return 0;
-    const uint64_t gate_bytes = 256ull * gate_expert_bytes;
-    const uint64_t down_bytes = 256ull * down_expert_bytes;
-    if (gate_bytes > model_size - gate_offset ||
-        gate_bytes > model_size - up_offset ||
-        down_bytes > model_size - down_offset) {
-        return 0;
-    }
-    const char *gate_w = cuda_model_range_ptr(model_map, gate_offset, gate_bytes, "moe_gate");
-    const char *up_w = cuda_model_range_ptr(model_map, up_offset, gate_bytes, "moe_up");
-    const char *down_w = cuda_model_range_ptr(model_map, down_offset, down_bytes, "moe_down");
-    if (!gate_w || !up_w || !down_w) return 0;
 
     int ok = 1;
     const uint32_t xq_blocks = expert_in_dim / CUDA_QK_K;
@@ -10317,6 +10304,56 @@ static int routed_moe_launch(
     return ok;
 }
 
+static int routed_moe_launch(
+        ds4_gpu_tensor *out,
+        ds4_gpu_tensor *gate,
+        ds4_gpu_tensor *up,
+        ds4_gpu_tensor *mid,
+        ds4_gpu_tensor *down,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t gate_offset,
+        uint64_t up_offset,
+        uint64_t down_offset,
+        uint32_t gate_type,
+        uint32_t down_type,
+        uint64_t gate_expert_bytes,
+        uint64_t gate_row_bytes,
+        uint64_t down_expert_bytes,
+        uint64_t down_row_bytes,
+        uint32_t expert_in_dim,
+        uint32_t expert_mid_dim,
+        uint32_t out_dim,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *weights,
+        uint32_t n_expert,
+        float clamp,
+        const ds4_gpu_tensor *x,
+        uint32_t n_tokens) {
+    if (!model_map ||
+        gate_offset > model_size || up_offset > model_size || down_offset > model_size) {
+        return 0;
+    }
+    const uint64_t gate_bytes = 256ull * gate_expert_bytes;
+    const uint64_t down_bytes = 256ull * down_expert_bytes;
+    if (gate_bytes > model_size - gate_offset ||
+        gate_bytes > model_size - up_offset ||
+        down_bytes > model_size - down_offset) {
+        return 0;
+    }
+    const char *gate_w = cuda_model_range_ptr(model_map, gate_offset, gate_bytes, "moe_gate");
+    const char *up_w = cuda_model_range_ptr(model_map, up_offset, gate_bytes, "moe_up");
+    const char *down_w = cuda_model_range_ptr(model_map, down_offset, down_bytes, "moe_down");
+    if (!gate_w || !up_w || !down_w) return 0;
+    return routed_moe_launch_core(out, gate, up, mid, down,
+                                  gate_w, up_w, down_w,
+                                  gate_type, down_type,
+                                  gate_expert_bytes, gate_row_bytes,
+                                  down_expert_bytes, down_row_bytes,
+                                  expert_in_dim, expert_mid_dim, out_dim,
+                                  selected, weights, n_expert, clamp, x, n_tokens);
+}
+
 extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x) {
     return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,
                              gate_offset, up_offset, down_offset,
@@ -10326,7 +10363,8 @@ extern "C" int ds4_gpu_routed_moe_one_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_expert, clamp, x, 1);
 }
-extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t n_tokens) {
+extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const void *model_map, uint64_t model_size, uint64_t gate_offset, uint64_t up_offset, uint64_t down_offset, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t n_tokens, bool *mid_is_f16) {
+    if (mid_is_f16) *mid_is_f16 = false;
     return routed_moe_launch(out, gate, up, mid, down, model_map, model_size,
                              gate_offset, up_offset, down_offset,
                              gate_type, down_type,
@@ -10334,6 +10372,41 @@ extern "C" int ds4_gpu_routed_moe_batch_tensor(ds4_gpu_tensor *out, ds4_gpu_tens
                              down_expert_bytes, down_row_bytes,
                              expert_in_dim, expert_mid_dim, out_dim,
                              selected, weights, n_expert, clamp, x, n_tokens);
+}
+extern "C" int ds4_gpu_routed_moe_one_external_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const ds4_gpu_tensor *gate_w, const ds4_gpu_tensor *up_w, const ds4_gpu_tensor *down_w, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_count, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x) {
+    if (!gate_w || !up_w || !down_w) return 0;
+    if (gate_w->bytes < (uint64_t)expert_count * gate_expert_bytes ||
+        up_w->bytes < (uint64_t)expert_count * gate_expert_bytes ||
+        down_w->bytes < (uint64_t)expert_count * down_expert_bytes) {
+        return 0;
+    }
+    return routed_moe_launch_core(out, gate, up, mid, down,
+                                  (const char *)gate_w->ptr,
+                                  (const char *)up_w->ptr,
+                                  (const char *)down_w->ptr,
+                                  gate_type, down_type,
+                                  gate_expert_bytes, gate_row_bytes,
+                                  down_expert_bytes, down_row_bytes,
+                                  expert_in_dim, expert_mid_dim, out_dim,
+                                  selected, weights, n_expert, clamp, x, 1);
+}
+extern "C" int ds4_gpu_routed_moe_batch_external_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const ds4_gpu_tensor *gate_w, const ds4_gpu_tensor *up_w, const ds4_gpu_tensor *down_w, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_count, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t n_tokens, bool *mid_is_f16) {
+    if (mid_is_f16) *mid_is_f16 = false;
+    if (!gate_w || !up_w || !down_w) return 0;
+    if (gate_w->bytes < (uint64_t)expert_count * gate_expert_bytes ||
+        up_w->bytes < (uint64_t)expert_count * gate_expert_bytes ||
+        down_w->bytes < (uint64_t)expert_count * down_expert_bytes) {
+        return 0;
+    }
+    return routed_moe_launch_core(out, gate, up, mid, down,
+                                  (const char *)gate_w->ptr,
+                                  (const char *)up_w->ptr,
+                                  (const char *)down_w->ptr,
+                                  gate_type, down_type,
+                                  gate_expert_bytes, gate_row_bytes,
+                                  down_expert_bytes, down_row_bytes,
+                                  expert_in_dim, expert_mid_dim, out_dim,
+                                  selected, weights, n_expert, clamp, x, n_tokens);
 }
 extern "C" int ds4_gpu_hc_split_sinkhorn_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *mix, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, uint32_t sinkhorn_iters, float eps) {
     if (!out || !mix || !model_map || n_hc != 4) return 0;

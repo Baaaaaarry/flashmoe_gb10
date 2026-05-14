@@ -4177,6 +4177,135 @@ static bool flashmoe_load_selected_blob_views(
     return true;
 }
 
+typedef struct {
+    uint32_t active_count;
+    uint64_t gate_expert_bytes;
+    uint64_t up_expert_bytes;
+    uint64_t down_expert_bytes;
+    uint64_t gate_row_bytes;
+    uint64_t up_row_bytes;
+    uint64_t down_row_bytes;
+    int32_t *selected_local;
+    uint8_t *gate_bytes;
+    uint8_t *up_bytes;
+    uint8_t *down_bytes;
+} ds4_flashmoe_selected_pack;
+
+static void flashmoe_selected_pack_free(ds4_flashmoe_selected_pack *pack) {
+    if (!pack) return;
+    free(pack->down_bytes);
+    free(pack->up_bytes);
+    free(pack->gate_bytes);
+    free(pack->selected_local);
+    memset(pack, 0, sizeof(*pack));
+}
+
+static bool flashmoe_pack_selected_experts(
+        const ds4_layer_weights      *layer,
+        uint32_t                      il,
+        const int                    *selected,
+        uint32_t                      n_pairs,
+        ds4_flashmoe_selected_pack   *out_pack) {
+    if (!layer || !selected || !out_pack || n_pairs == 0) return false;
+    memset(out_pack, 0, sizeof(*out_pack));
+
+    uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
+    uint64_t gate_rb = 0, up_rb = 0, down_rb = 0;
+    flashmoe_expected_blob_layout(layer,
+                                  &gate_bytes,
+                                  &up_bytes,
+                                  &down_bytes,
+                                  &gate_rb,
+                                  &up_rb,
+                                  &down_rb);
+    const uint64_t expected_size = gate_bytes + up_bytes + down_bytes;
+    int32_t local_by_global[DS4_N_EXPERT];
+    uint16_t active_global[DS4_N_EXPERT];
+    for (uint32_t i = 0; i < DS4_N_EXPERT; i++) local_by_global[i] = -1;
+
+    out_pack->selected_local = xmalloc((size_t)n_pairs * sizeof(out_pack->selected_local[0]));
+    uint32_t active_count = 0;
+    for (uint32_t i = 0; i < n_pairs; i++) {
+        const int expert = selected[i];
+        if (expert < 0 || expert >= DS4_N_EXPERT) {
+            flashmoe_selected_pack_free(out_pack);
+            return false;
+        }
+        int32_t local = local_by_global[expert];
+        if (local < 0) {
+            local = (int32_t)active_count;
+            local_by_global[expert] = local;
+            active_global[active_count++] = (uint16_t)expert;
+        }
+        out_pack->selected_local[i] = local;
+    }
+
+    out_pack->gate_bytes = xmalloc((size_t)active_count * gate_bytes);
+    out_pack->up_bytes = xmalloc((size_t)active_count * up_bytes);
+    out_pack->down_bytes = xmalloc((size_t)active_count * down_bytes);
+    char ferr[256];
+    for (uint32_t i = 0; i < active_count; i++) {
+        uint64_t actual_size = 0;
+        const uint8_t *blob = ds4_flashmoe_runtime_get_blob((uint16_t)il,
+                                                            active_global[i],
+                                                            expected_size,
+                                                            &actual_size,
+                                                            ferr,
+                                                            sizeof(ferr));
+        if (!blob || actual_size != expected_size) {
+            fprintf(stderr,
+                    "ds4: FlashMoE backend failed to load packed blob layer=%u expert=%u: %s\n",
+                    il,
+                    active_global[i],
+                    ferr[0] ? ferr : "unexpected blob size");
+            flashmoe_selected_pack_free(out_pack);
+            return false;
+        }
+        memcpy(out_pack->gate_bytes + (uint64_t)i * gate_bytes, blob, gate_bytes);
+        memcpy(out_pack->up_bytes + (uint64_t)i * up_bytes, blob + gate_bytes, up_bytes);
+        memcpy(out_pack->down_bytes + (uint64_t)i * down_bytes, blob + gate_bytes + up_bytes, down_bytes);
+    }
+
+    out_pack->active_count = active_count;
+    out_pack->gate_expert_bytes = gate_bytes;
+    out_pack->up_expert_bytes = up_bytes;
+    out_pack->down_expert_bytes = down_bytes;
+    out_pack->gate_row_bytes = gate_rb;
+    out_pack->up_row_bytes = up_rb;
+    out_pack->down_row_bytes = down_rb;
+    return true;
+}
+
+#ifndef DS4_NO_GPU
+static bool flashmoe_upload_selected_pack(
+        const ds4_flashmoe_selected_pack *pack,
+        uint32_t                          n_pairs,
+        ds4_gpu_tensor                  **gate_w,
+        ds4_gpu_tensor                  **up_w,
+        ds4_gpu_tensor                  **down_w,
+        ds4_gpu_tensor                  **selected_gpu) {
+    *gate_w = NULL;
+    *up_w = NULL;
+    *down_w = NULL;
+    *selected_gpu = NULL;
+    if (!pack || pack->active_count == 0 || n_pairs == 0) return false;
+
+    *gate_w = ds4_gpu_tensor_alloc((uint64_t)pack->active_count * pack->gate_expert_bytes);
+    *up_w = ds4_gpu_tensor_alloc((uint64_t)pack->active_count * pack->up_expert_bytes);
+    *down_w = ds4_gpu_tensor_alloc((uint64_t)pack->active_count * pack->down_expert_bytes);
+    *selected_gpu = ds4_gpu_tensor_alloc((uint64_t)n_pairs * sizeof(pack->selected_local[0]));
+    if (!*gate_w || !*up_w || !*down_w || !*selected_gpu) return false;
+    return ds4_gpu_tensor_write(*gate_w, 0, pack->gate_bytes,
+                                (uint64_t)pack->active_count * pack->gate_expert_bytes) != 0 &&
+           ds4_gpu_tensor_write(*up_w, 0, pack->up_bytes,
+                                (uint64_t)pack->active_count * pack->up_expert_bytes) != 0 &&
+           ds4_gpu_tensor_write(*down_w, 0, pack->down_bytes,
+                                (uint64_t)pack->active_count * pack->down_expert_bytes) != 0 &&
+           ds4_gpu_tensor_write(*selected_gpu, 0, pack->selected_local,
+                                (uint64_t)n_pairs * sizeof(pack->selected_local[0])) != 0;
+}
+#endif
+
 static void layer_routed_moe_one_prealloc_flashmoe_selected(
         float             * out,
         const ds4_layer_weights * layer,
@@ -8893,51 +9022,50 @@ typedef struct {
     bool mtp_enabled;
 } ds4_gpu_graph;
 
+#ifndef DS4_NO_GPU
 static bool metal_graph_decode_routed_flashmoe(
         ds4_gpu_graph          *g,
         const ds4_layer_weights *layer,
         uint32_t                il) {
-    float *ffn_norm = xmalloc((size_t)DS4_N_EMBD * sizeof(ffn_norm[0]));
-    float *expert_weight = xmalloc((size_t)DS4_N_EXPERT_USED * sizeof(expert_weight[0]));
-    float *routed_mid = xmalloc((size_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP * sizeof(routed_mid[0]));
-    float *routed_out = xmalloc((size_t)DS4_N_EMBD * sizeof(routed_out[0]));
-    block_q8_K *xq = xmalloc((size_t)(layer->ffn_gate_exps->dim[0] / QK_K) * sizeof(xq[0]));
-    block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (layer->ffn_down_exps->dim[0] / QK_K) * sizeof(midq[0]));
     int selected[DS4_N_EXPERT_USED];
+    ds4_flashmoe_selected_pack pack;
+    ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL, *selected_gpu = NULL;
     bool ok = false;
+    memset(&pack, 0, sizeof(pack));
 
-    if (!ffn_norm || !expert_weight || !routed_mid || !routed_out || !xq || !midq) goto cleanup;
-    if (ds4_gpu_tensor_read(g->ffn_norm, 0, ffn_norm, (uint64_t)DS4_N_EMBD * sizeof(float)) == 0) goto cleanup;
     if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
-    if (ds4_gpu_tensor_read(g->router_weights, 0, expert_weight, sizeof(float) * DS4_N_EXPERT_USED) == 0) goto cleanup;
-
-    layer_routed_moe_one_prealloc_flashmoe_selected(routed_out,
-                                                    layer,
-                                                    il,
-                                                    selected,
-                                                    expert_weight,
-                                                    DS4_SWIGLU_CLAMP_EXP,
-                                                    routed_mid,
-                                                    xq,
-                                                    midq,
-                                                    layer->ffn_gate_exps->dim[0],
-                                                    layer->ffn_gate_exps->dim[1],
-                                                    layer->ffn_down_exps->dim[0],
-                                                    layer->ffn_down_exps->dim[1]);
-
-    if (ds4_gpu_tensor_write(g->routed_mid, 0, routed_mid,
-                             (uint64_t)DS4_N_EXPERT_USED * DS4_N_FF_EXP * sizeof(float)) == 0) goto cleanup;
-    if (ds4_gpu_tensor_write(g->routed_out, 0, routed_out,
-                             (uint64_t)DS4_N_EMBD * sizeof(float)) == 0) goto cleanup;
-    ok = true;
+    if (!flashmoe_pack_selected_experts(layer, il, selected, DS4_N_EXPERT_USED, &pack)) goto cleanup;
+    if (!flashmoe_upload_selected_pack(&pack, DS4_N_EXPERT_USED, &gate_w, &up_w, &down_w, &selected_gpu)) goto cleanup;
+    ok = ds4_gpu_routed_moe_one_external_tensor(g->routed_out,
+                                                g->routed_gate,
+                                                g->routed_up,
+                                                g->routed_mid,
+                                                g->routed_down,
+                                                gate_w,
+                                                up_w,
+                                                down_w,
+                                                layer->ffn_gate_exps->type,
+                                                layer->ffn_down_exps->type,
+                                                pack.gate_expert_bytes,
+                                                pack.gate_row_bytes,
+                                                pack.down_expert_bytes,
+                                                pack.down_row_bytes,
+                                                pack.active_count,
+                                                (uint32_t)layer->ffn_gate_exps->dim[0],
+                                                (uint32_t)layer->ffn_down_exps->dim[0],
+                                                (uint32_t)layer->ffn_down_exps->dim[1],
+                                                selected_gpu,
+                                                g->router_weights,
+                                                DS4_N_EXPERT_USED,
+                                                DS4_SWIGLU_CLAMP_EXP,
+                                                g->ffn_norm) != 0;
 
 cleanup:
-    free(midq);
-    free(xq);
-    free(routed_out);
-    free(routed_mid);
-    free(expert_weight);
-    free(ffn_norm);
+    ds4_gpu_tensor_free(selected_gpu);
+    ds4_gpu_tensor_free(down_w);
+    ds4_gpu_tensor_free(up_w);
+    ds4_gpu_tensor_free(gate_w);
+    flashmoe_selected_pack_free(&pack);
     return ok;
 }
 
@@ -8946,44 +9074,54 @@ static bool metal_graph_prefill_routed_flashmoe(
         const ds4_layer_weights *layer,
         uint32_t                il,
         uint32_t                n_tokens) {
-    const uint64_t norm_elems = (uint64_t)n_tokens * DS4_N_EMBD;
     const uint64_t selected_elems = (uint64_t)n_tokens * DS4_N_EXPERT_USED;
-    const uint64_t routed_mid_elems = (uint64_t)n_tokens * DS4_N_EXPERT_USED * DS4_N_FF_EXP;
-    float *ffn_norm = xmalloc(norm_elems * sizeof(ffn_norm[0]));
     int *selected = xmalloc(selected_elems * sizeof(selected[0]));
-    float *expert_weight = xmalloc(selected_elems * sizeof(expert_weight[0]));
-    float *routed_mid = xmalloc(routed_mid_elems * sizeof(routed_mid[0]));
-    float *routed_out = xcalloc((uint64_t)n_tokens * DS4_N_EMBD, sizeof(routed_out[0]));
+    ds4_flashmoe_selected_pack pack;
+    ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL, *selected_gpu = NULL;
     bool ok = false;
+    memset(&pack, 0, sizeof(pack));
 
-    if (!ffn_norm || !selected || !expert_weight || !routed_mid || !routed_out) goto cleanup;
-    if (ds4_gpu_tensor_read(g->batch_ffn_norm, 0, ffn_norm, norm_elems * sizeof(float)) == 0) goto cleanup;
+    if (!selected) goto cleanup;
     if (ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, selected_elems * sizeof(int)) == 0) goto cleanup;
-    if (ds4_gpu_tensor_read(g->batch_router_weights, 0, expert_weight, selected_elems * sizeof(float)) == 0) goto cleanup;
-    memset(routed_out, 0, (size_t)((uint64_t)n_tokens * DS4_N_EMBD) * sizeof(float));
-    layer_routed_moe_batch_flashmoe_selected(routed_out,
-                                             routed_mid,
-                                             layer,
-                                             ffn_norm,
-                                             selected,
-                                             expert_weight,
-                                             n_tokens,
-                                             il,
-                                             DS4_SWIGLU_CLAMP_EXP);
-
-    if (ds4_gpu_tensor_write(g->batch_routed_mid, 0, routed_mid, routed_mid_elems * sizeof(float)) == 0) goto cleanup;
-    if (ds4_gpu_tensor_write(g->batch_routed_out, 0, routed_out,
-                             (uint64_t)n_tokens * DS4_N_EMBD * sizeof(float)) == 0) goto cleanup;
-    ok = true;
+    if (!flashmoe_pack_selected_experts(layer, il, selected, (uint32_t)selected_elems, &pack)) goto cleanup;
+    if (!flashmoe_upload_selected_pack(&pack, (uint32_t)selected_elems, &gate_w, &up_w, &down_w, &selected_gpu)) goto cleanup;
+    g->batch_routed_mid_is_f16 = false;
+    ok = ds4_gpu_routed_moe_batch_external_tensor(g->batch_routed_out,
+                                                  g->batch_routed_gate,
+                                                  g->batch_routed_up,
+                                                  g->batch_routed_mid,
+                                                  g->batch_routed_down,
+                                                  gate_w,
+                                                  up_w,
+                                                  down_w,
+                                                  layer->ffn_gate_exps->type,
+                                                  layer->ffn_down_exps->type,
+                                                  pack.gate_expert_bytes,
+                                                  pack.gate_row_bytes,
+                                                  pack.down_expert_bytes,
+                                                  pack.down_row_bytes,
+                                                  pack.active_count,
+                                                  (uint32_t)layer->ffn_gate_exps->dim[0],
+                                                  (uint32_t)layer->ffn_down_exps->dim[0],
+                                                  (uint32_t)layer->ffn_down_exps->dim[1],
+                                                  selected_gpu,
+                                                  g->batch_router_weights,
+                                                  DS4_N_EXPERT_USED,
+                                                  DS4_SWIGLU_CLAMP_EXP,
+                                                  g->batch_ffn_norm,
+                                                  n_tokens,
+                                                  &g->batch_routed_mid_is_f16) != 0;
 
 cleanup:
-    free(routed_out);
-    free(routed_mid);
-    free(expert_weight);
+    ds4_gpu_tensor_free(selected_gpu);
+    ds4_gpu_tensor_free(down_w);
+    ds4_gpu_tensor_free(up_w);
+    ds4_gpu_tensor_free(gate_w);
+    flashmoe_selected_pack_free(&pack);
     free(selected);
-    free(ffn_norm);
     return ok;
 }
+#endif
 
 /* Release every Metal tensor owned by the whole-model graph runtime. */
 static void metal_graph_free(ds4_gpu_graph *g) {
