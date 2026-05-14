@@ -17738,15 +17738,6 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
                 *out = NULL;
                 return 1;
             }
-            if (ds4_flashmoe_runtime_open(&e->flashmoe_manifest,
-                                          e->flashmoe_cfg.cache_limit_bytes,
-                                          ferr,
-                                          sizeof(ferr)) != 0) {
-                fprintf(stderr, "ds4: failed to initialize FlashMoE runtime cache: %s\n", ferr);
-                ds4_engine_close(e);
-                *out = NULL;
-                return 1;
-            }
             e->flashmoe_manifest_ready = true;
             fprintf(stderr,
                     "ds4: FlashMoE manifest loaded: %zu entries across %zu layers (min=%zu max=%zu per layer, cache_limit=%.2f GiB)\n",
@@ -17874,6 +17865,16 @@ void ds4_engine_close(ds4_engine *e) {
 
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
+    if (e->flashmoe_manifest_ready && !ds4_flashmoe_runtime_ready()) {
+        char ferr[256];
+        if (ds4_flashmoe_runtime_open(&e->flashmoe_manifest,
+                                      e->flashmoe_cfg.cache_limit_bytes,
+                                      ferr,
+                                      sizeof(ferr)) != 0) {
+            fprintf(stderr, "ds4: failed to initialize FlashMoE runtime cache: %s\n", ferr);
+            return 1;
+        }
+    }
     if (e->backend == DS4_BACKEND_CPU) {
         ds4_session *s = xcalloc(1, sizeof(*s));
         s->engine = e;
