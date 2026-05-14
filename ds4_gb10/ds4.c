@@ -6055,6 +6055,137 @@ static void layer_routed_moe_batch_flashmoe(
     free(selected);
 }
 
+static DS4_MAYBE_UNUSED void layer_routed_moe_batch_flashmoe_selected(
+        float                    *moe,
+        float                    *mid_out,
+        const ds4_layer_weights  *layer,
+        const float              *norm,
+        const int                *selected,
+        const float              *pair_weight,
+        uint32_t                  n_tok,
+        uint32_t                  il,
+        float                     clamp) {
+    const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
+    const uint64_t expert_out_dim = layer->ffn_gate_exps->dim[1];
+    const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
+    const uint64_t down_out_dim = layer->ffn_down_exps->dim[1];
+    if (expert_in_dim % QK_K != 0) ds4_die("IQ2_XXS expert input is not QK_K aligned");
+    if (down_in_dim % QK_K != 0) ds4_die("Q2_K expert input is not QK_K aligned");
+    if (expert_out_dim != down_in_dim || down_out_dim != DS4_N_EMBD) {
+        ds4_die("FlashMoE selected expert tensor layout is unexpected");
+    }
+
+    const uint32_t total_pairs = n_tok * DS4_N_EXPERT_USED;
+    uint32_t counts[DS4_N_EXPERT + 1] = {0};
+    uint32_t cursor[DS4_N_EXPERT] = {0};
+    uint32_t active_expert[DS4_N_EXPERT];
+    uint32_t n_active = 0;
+
+    ds4_expert_pair *pairs = xmalloc((size_t)total_pairs * sizeof(pairs[0]));
+    const uint64_t xq_blocks = expert_in_dim / QK_K;
+    block_q8_K *xq = xmalloc((size_t)n_tok * xq_blocks * sizeof(xq[0]));
+
+    for (uint32_t t = 0; t < n_tok; t++) {
+        ds4_quantize_row_q8_K(norm + (uint64_t)t * expert_in_dim,
+                              xq + (uint64_t)t * xq_blocks,
+                              (int64_t)expert_in_dim);
+        for (uint32_t slot = 0; slot < DS4_N_EXPERT_USED; slot++) {
+            const uint32_t pair_id = t * DS4_N_EXPERT_USED + slot;
+            const int expert = selected[pair_id];
+            pairs[pair_id] = (ds4_expert_pair){ .token = t, .slot = slot };
+            if (expert < 0 || expert >= DS4_N_EXPERT) ds4_die("selected expert is outside range");
+            counts[(uint32_t)expert + 1]++;
+        }
+    }
+
+    for (uint32_t e = 0; e < DS4_N_EXPERT; e++) {
+        counts[e + 1] += counts[e];
+        cursor[e] = counts[e];
+        if (counts[e + 1] != counts[e]) active_expert[n_active++] = e;
+    }
+
+    uint32_t *pair_ids = xmalloc((size_t)total_pairs * sizeof(pair_ids[0]));
+    for (uint32_t p = 0; p < total_pairs; p++) {
+        const uint32_t e = (uint32_t)selected[p];
+        pair_ids[cursor[e]++] = p;
+    }
+
+    float *mid = mid_out ? mid_out : xmalloc((size_t)total_pairs * expert_out_dim * sizeof(mid[0]));
+    matvec_iq2_xxs_batch_mid_ctx mid_ctx = {
+        .mid = mid,
+        .xq = xq,
+        .pairs = pairs,
+        .pair_ids = pair_ids,
+        .expert_offset = counts,
+        .active_expert = active_expert,
+        .pair_weight = pair_weight,
+        .clamp = clamp,
+        .in_dim = expert_in_dim,
+        .out_dim = expert_out_dim,
+        .xq_blocks = xq_blocks,
+    };
+    for (uint32_t ai = 0; ai < n_active; ai++) {
+        const uint32_t e = active_expert[ai];
+        const uint8_t *gate_base[1];
+        const uint8_t *up_base[1];
+        const uint8_t *down_base[1];
+        uint64_t gate_rb[1], up_rb[1], down_rb[1];
+        int sel_one[1] = {(int)e};
+        if (!flashmoe_load_selected_blob_views(layer, il, sel_one, 1, gate_base, up_base, down_base, gate_rb, up_rb, down_rb)) {
+            ds4_die("FlashMoE blob load failed");
+        }
+        mid_ctx.gate_base[e] = gate_base[0];
+        mid_ctx.up_base[e] = up_base[0];
+        mid_ctx.gate_row_bytes[e] = gate_rb[0];
+        mid_ctx.up_row_bytes[e] = up_rb[0];
+    }
+    ds4_parallel_for((uint64_t)n_active * expert_out_dim, matvec_iq2_xxs_batch_mid_worker, &mid_ctx);
+
+    const uint64_t midq_blocks = down_in_dim / QK_K;
+    block_q8_K *midq = xmalloc((size_t)total_pairs * midq_blocks * sizeof(midq[0]));
+    quantize_mid_pairs_ctx quant_ctx = {
+        .mid = mid,
+        .midq = midq,
+        .down_in_dim = down_in_dim,
+        .down_blocks = midq_blocks,
+    };
+    ds4_parallel_for(total_pairs, quantize_mid_pairs_worker, &quant_ctx);
+
+    matvec_q2_k_batch_accum_rows_ctx down_ctx = {
+        .moe = moe,
+        .midq = midq,
+        .pairs = pairs,
+        .pair_ids = pair_ids,
+        .expert_offset = counts,
+        .active_expert = active_expert,
+        .n_active = n_active,
+        .n_tok = n_tok,
+        .in_dim = down_in_dim,
+        .out_dim = down_out_dim,
+        .midq_blocks = midq_blocks,
+    };
+    for (uint32_t ai = 0; ai < n_active; ai++) {
+        const uint32_t e = active_expert[ai];
+        const uint8_t *gate_base[1];
+        const uint8_t *up_base[1];
+        const uint8_t *down_base[1];
+        uint64_t gate_rb[1], up_rb[1], down_rb[1];
+        int sel_one[1] = {(int)e};
+        if (!flashmoe_load_selected_blob_views(layer, il, sel_one, 1, gate_base, up_base, down_base, gate_rb, up_rb, down_rb)) {
+            ds4_die("FlashMoE blob load failed");
+        }
+        down_ctx.base[e] = down_base[0];
+        down_ctx.row_bytes[e] = down_rb[0];
+    }
+    ds4_parallel_for(down_out_dim, matvec_q2_k_batch_accum_rows_worker, &down_ctx);
+
+    free(midq);
+    if (!mid_out) free(mid);
+    free(pair_ids);
+    free(xq);
+    free(pairs);
+}
+
 static void print_vec_stats(const char *name, const float *x, uint64_t n);
 
 /* Full FFN sublayer for one token: HC pre, RMSNorm, routed MoE, shared expert,
@@ -8823,30 +8954,22 @@ static bool metal_graph_prefill_routed_flashmoe(
     float *expert_weight = xmalloc(selected_elems * sizeof(expert_weight[0]));
     float *routed_mid = xmalloc(routed_mid_elems * sizeof(routed_mid[0]));
     float *routed_out = xcalloc((uint64_t)n_tokens * DS4_N_EMBD, sizeof(routed_out[0]));
-    block_q8_K *xq = xmalloc((size_t)(layer->ffn_gate_exps->dim[0] / QK_K) * sizeof(xq[0]));
-    block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (layer->ffn_down_exps->dim[0] / QK_K) * sizeof(midq[0]));
     bool ok = false;
 
-    if (!ffn_norm || !selected || !expert_weight || !routed_mid || !routed_out || !xq || !midq) goto cleanup;
+    if (!ffn_norm || !selected || !expert_weight || !routed_mid || !routed_out) goto cleanup;
     if (ds4_gpu_tensor_read(g->batch_ffn_norm, 0, ffn_norm, norm_elems * sizeof(float)) == 0) goto cleanup;
     if (ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, selected_elems * sizeof(int)) == 0) goto cleanup;
     if (ds4_gpu_tensor_read(g->batch_router_weights, 0, expert_weight, selected_elems * sizeof(float)) == 0) goto cleanup;
-
-    for (uint32_t t = 0; t < n_tokens; t++) {
-        layer_routed_moe_one_prealloc_flashmoe_selected(routed_out + (uint64_t)t * DS4_N_EMBD,
-                                                        layer,
-                                                        il,
-                                                        selected + (uint64_t)t * DS4_N_EXPERT_USED,
-                                                        expert_weight + (uint64_t)t * DS4_N_EXPERT_USED,
-                                                        DS4_SWIGLU_CLAMP_EXP,
-                                                        routed_mid + (uint64_t)t * DS4_N_EXPERT_USED * DS4_N_FF_EXP,
-                                                        xq,
-                                                        midq,
-                                                        layer->ffn_gate_exps->dim[0],
-                                                        layer->ffn_gate_exps->dim[1],
-                                                        layer->ffn_down_exps->dim[0],
-                                                        layer->ffn_down_exps->dim[1]);
-    }
+    memset(routed_out, 0, (size_t)((uint64_t)n_tokens * DS4_N_EMBD) * sizeof(float));
+    layer_routed_moe_batch_flashmoe_selected(routed_out,
+                                             routed_mid,
+                                             layer,
+                                             ffn_norm,
+                                             selected,
+                                             expert_weight,
+                                             n_tokens,
+                                             il,
+                                             DS4_SWIGLU_CLAMP_EXP);
 
     if (ds4_gpu_tensor_write(g->batch_routed_mid, 0, routed_mid, routed_mid_elems * sizeof(float)) == 0) goto cleanup;
     if (ds4_gpu_tensor_write(g->batch_routed_out, 0, routed_out,
@@ -8854,8 +8977,6 @@ static bool metal_graph_prefill_routed_flashmoe(
     ok = true;
 
 cleanup:
-    free(midq);
-    free(xq);
     free(routed_out);
     free(routed_mid);
     free(expert_weight);
@@ -17790,10 +17911,14 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
         }
         ds4_gpu_set_quality(e->quality);
         (void)ds4_gpu_set_model_fd(e->model.fd);
-        if (!ds4_gpu_set_model_map_range(e->model.map,
-                                           e->model.size,
-                                           e->model.tensor_data_pos,
-                                           e->model.size - e->model.tensor_data_pos))
+        const bool flashmoe_lazy_model = e->flashmoe_manifest_ready;
+        const bool map_ok = flashmoe_lazy_model
+            ? ds4_gpu_set_model_map_lazy(e->model.map, e->model.size) != 0
+            : ds4_gpu_set_model_map_range(e->model.map,
+                                          e->model.size,
+                                          e->model.tensor_data_pos,
+                                          e->model.size - e->model.tensor_data_pos) != 0;
+        if (!map_ok)
         {
             fprintf(stderr,
                     "ds4: %s failed to map model views; aborting startup. "

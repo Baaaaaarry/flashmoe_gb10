@@ -36,6 +36,7 @@ int ds4_gpu_end_commands(void);
 int ds4_gpu_synchronize(void);
 
 int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size);
+int ds4_gpu_set_model_map_lazy(const void *model_map, uint64_t model_size);
 int ds4_gpu_set_model_fd(int fd);
 int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size);
 int ds4_gpu_cache_model_range(const void *model_map, uint64_t model_size, uint64_t offset, uint64_t bytes, const char *label);

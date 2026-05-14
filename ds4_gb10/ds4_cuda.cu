@@ -1442,6 +1442,46 @@ extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size)
     return 1;
 }
 
+extern "C" int ds4_gpu_set_model_map_lazy(const void *model_map, uint64_t model_size) {
+    if (!model_map || model_size == 0) return 0;
+    if (g_model_host_base == model_map && g_model_registered_size == model_size &&
+        !g_model_registered && !g_model_device_owned) {
+        return 1;
+    }
+    cuda_model_range_release_all();
+    cuda_q8_f16_cache_release_all();
+    g_q8_f16_disabled_after_oom = 0;
+    g_q8_f16_budget_notice_printed = 0;
+    for (const cuda_q8_f32_range &r : g_q8_f32_ranges) {
+        (void)cudaFree(r.device_ptr);
+    }
+    g_q8_f32_ranges.clear();
+    g_q8_f32_by_offset.clear();
+    g_q8_f32_bytes = 0;
+    if (g_model_device_owned && g_model_device_base) {
+        (void)cudaFree((void *)g_model_device_base);
+        g_model_device_owned = 0;
+    }
+    if (g_model_registered && g_model_host_base) {
+        (void)cudaHostUnregister((void *)g_model_host_base);
+        g_model_registered = 0;
+    }
+    g_model_host_base = model_map;
+    g_model_device_base = (const char *)model_map;
+    g_model_registered_size = model_size;
+    g_model_range_mapping_supported = 1;
+    g_model_hmm_direct = 0;
+    g_model_cache_full = 0;
+    if (g_model_fd >= 0 && g_model_fd_host_base == NULL) {
+        g_model_fd_host_base = model_map;
+    }
+    if (getenv("DS4_CUDA_WEIGHT_CACHE_VERBOSE")) {
+        fprintf(stderr, "ds4: CUDA lazy model mapping enabled for %.2f GiB model image\n",
+                (double)model_size / 1073741824.0);
+    }
+    return 1;
+}
+
 extern "C" int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size) {
     if (!ds4_gpu_set_model_map(model_map, model_size)) return 0;
     if (getenv("DS4_CUDA_COPY_MODEL_CHUNKED") != NULL &&
