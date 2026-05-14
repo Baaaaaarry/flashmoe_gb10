@@ -430,6 +430,11 @@ static bool ds4_str_eq(ds4_str a, ds4_str b) {
     return a.len == b.len && memcmp(a.ptr, b.ptr, a.len) == 0;
 }
 
+static DS4_MAYBE_UNUSED bool ds4_str_ends_with(ds4_str s, const char *suffix) {
+    size_t n = strlen(suffix);
+    return s.len >= n && memcmp(s.ptr + (s.len - n), suffix, n) == 0;
+}
+
 static uint64_t hash_bytes(const void *ptr, uint64_t len) {
     const uint8_t *p = ptr;
     uint64_t h = 1469598103934665603ull;
@@ -1380,6 +1385,13 @@ static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *c
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         const ds4_tensor *t = &m->tensors[i];
         if (t->bytes == 0) continue;
+        if (ds4_flashmoe_backend_requested()) {
+            if (ds4_str_ends_with(t->name, ".ffn_gate_exps.weight") ||
+                ds4_str_ends_with(t->name, ".ffn_up_exps.weight") ||
+                ds4_str_ends_with(t->name, ".ffn_down_exps.weight")) {
+                continue;
+            }
+        }
         if (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset) {
             free(spans);
             return false;
@@ -4124,6 +4136,64 @@ static bool flashmoe_load_selected_blob_views(
     return true;
 }
 
+static void layer_routed_moe_one_prealloc_flashmoe_selected(
+        float             * out,
+        const ds4_layer_weights * layer,
+        uint32_t            il,
+        const int         * selected,
+        const float       * expert_weight,
+        float               clamp,
+        float              * mid_all,
+        block_q8_K         * xq,
+        block_q8_K         * midq,
+        uint64_t            expert_in_dim,
+        uint64_t            expert_out_dim,
+        uint64_t            down_in_dim,
+        uint64_t            down_out_dim) {
+    const uint8_t *gate_base[DS4_N_EXPERT_USED];
+    const uint8_t *up_base[DS4_N_EXPERT_USED];
+    const uint8_t *down_base[DS4_N_EXPERT_USED];
+    uint64_t gate_row_bytes[DS4_N_EXPERT_USED];
+    uint64_t up_row_bytes[DS4_N_EXPERT_USED];
+    uint64_t down_row_bytes[DS4_N_EXPERT_USED];
+
+    if (!flashmoe_load_selected_blob_views(layer,
+                                           il,
+                                           selected,
+                                           DS4_N_EXPERT_USED,
+                                           gate_base,
+                                           up_base,
+                                           down_base,
+                                           gate_row_bytes,
+                                           up_row_bytes,
+                                           down_row_bytes)) {
+        ds4_die("FlashMoE blob load failed");
+    }
+    matvec_iq2_xxs_experts_mid_prequant_external(mid_all,
+                                                 gate_base,
+                                                 up_base,
+                                                 gate_row_bytes,
+                                                 up_row_bytes,
+                                                 expert_in_dim,
+                                                 expert_out_dim,
+                                                 xq,
+                                                 expert_weight,
+                                                 DS4_N_EXPERT_USED,
+                                                 clamp);
+    for (int i = 0; i < DS4_N_EXPERT_USED; i++) {
+        ds4_quantize_row_q8_K(mid_all + (uint64_t)i * down_in_dim,
+                              midq + (uint64_t)i * (down_in_dim / QK_K),
+                              (int64_t)down_in_dim);
+    }
+    matvec_q2_k_experts_accum_prequant_external(out,
+                                                down_base,
+                                                down_row_bytes,
+                                                down_in_dim,
+                                                down_out_dim,
+                                                midq,
+                                                DS4_N_EXPERT_USED);
+}
+
 typedef struct {
     uint32_t token;
     uint32_t slot;
@@ -5738,13 +5808,6 @@ static void layer_routed_moe_one_prealloc_flashmoe(
     const uint64_t expert_out_dim = layer->ffn_gate_exps->dim[1];
     const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
     const uint64_t down_out_dim = layer->ffn_down_exps->dim[1];
-    const uint8_t *gate_base[DS4_N_EXPERT_USED];
-    const uint8_t *up_base[DS4_N_EXPERT_USED];
-    const uint8_t *down_base[DS4_N_EXPERT_USED];
-    uint64_t gate_row_bytes[DS4_N_EXPERT_USED];
-    uint64_t up_row_bytes[DS4_N_EXPERT_USED];
-    uint64_t down_row_bytes[DS4_N_EXPERT_USED];
-
     if (expert_in_dim % QK_K != 0) ds4_die("IQ2_XXS expert input is not QK_K aligned");
     if (down_in_dim != DS4_N_FF_EXP || down_in_dim % QK_K != 0) ds4_die("Q2_K expert input has an unexpected layout");
     if (expert_out_dim != down_in_dim || down_out_dim != DS4_N_EMBD) ds4_die("FlashMoE routed tensor layout is unexpected");
@@ -5758,42 +5821,19 @@ static void layer_routed_moe_one_prealloc_flashmoe(
     } else {
         layer_topk_selected_experts(selected, expert_weight, model, layer, x);
     }
-    if (!flashmoe_load_selected_blob_views(layer,
-                                           il,
-                                           selected,
-                                           DS4_N_EXPERT_USED,
-                                           gate_base,
-                                           up_base,
-                                           down_base,
-                                           gate_row_bytes,
-                                           up_row_bytes,
-                                           down_row_bytes)) {
-        ds4_die("FlashMoE blob load failed");
-    }
-
-    matvec_iq2_xxs_experts_mid_prequant_external(mid_all,
-                                                 gate_base,
-                                                 up_base,
-                                                 gate_row_bytes,
-                                                 up_row_bytes,
-                                                 expert_in_dim,
-                                                 expert_out_dim,
-                                                 xq,
-                                                 expert_weight,
-                                                 DS4_N_EXPERT_USED,
-                                                 clamp);
-    for (int i = 0; i < DS4_N_EXPERT_USED; i++) {
-        ds4_quantize_row_q8_K(mid_all + (uint64_t)i * down_in_dim,
-                              midq + (uint64_t)i * (down_in_dim / QK_K),
-                              (int64_t)down_in_dim);
-    }
-    matvec_q2_k_experts_accum_prequant_external(out,
-                                                down_base,
-                                                down_row_bytes,
-                                                down_in_dim,
-                                                down_out_dim,
-                                                midq,
-                                                DS4_N_EXPERT_USED);
+    layer_routed_moe_one_prealloc_flashmoe_selected(out,
+                                                    layer,
+                                                    il,
+                                                    selected,
+                                                    expert_weight,
+                                                    clamp,
+                                                    mid_all,
+                                                    xq,
+                                                    midq,
+                                                    expert_in_dim,
+                                                    expert_out_dim,
+                                                    down_in_dim,
+                                                    down_out_dim);
 }
 
 static void layer_routed_moe_one_flashmoe(
@@ -5973,6 +6013,102 @@ static void layer_routed_moe_batch_flashmoe(
     free(pair_weight);
     free(selected);
 }
+
+#ifndef DS4_NO_GPU
+static bool metal_graph_decode_routed_flashmoe(
+        ds4_gpu_graph            *g,
+        const ds4_layer_weights  *layer,
+        uint32_t                  il) {
+    const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
+    const uint64_t expert_mid_dim = layer->ffn_gate_exps->dim[1];
+    const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
+    const uint64_t routed_out_dim = layer->ffn_down_exps->dim[1];
+    float *cpu_ffn_norm = xmalloc((size_t)DS4_N_EMBD * sizeof(cpu_ffn_norm[0]));
+    float *cpu_routed = xmalloc((size_t)DS4_N_EMBD * sizeof(cpu_routed[0]));
+    float *mid_all = xmalloc((size_t)DS4_N_EXPERT_USED * down_in_dim * sizeof(mid_all[0]));
+    block_q8_K *xq = xmalloc((size_t)(expert_in_dim / QK_K) * sizeof(xq[0]));
+    block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (down_in_dim / QK_K) * sizeof(midq[0]));
+    int selected[DS4_N_EXPERT_USED];
+    float expert_weight[DS4_N_EXPERT_USED];
+    bool ok = ds4_gpu_tensor_read(g->ffn_norm, 0, cpu_ffn_norm, (uint64_t)DS4_N_EMBD * sizeof(cpu_ffn_norm[0])) != 0 &&
+              ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) != 0 &&
+              ds4_gpu_tensor_read(g->router_weights, 0, expert_weight, sizeof(expert_weight)) != 0;
+    if (ok) {
+        memset(cpu_routed, 0, (size_t)DS4_N_EMBD * sizeof(cpu_routed[0]));
+        ds4_quantize_row_q8_K(cpu_ffn_norm, xq, (int64_t)expert_in_dim);
+        layer_routed_moe_one_prealloc_flashmoe_selected(cpu_routed,
+                                                        layer,
+                                                        il,
+                                                        selected,
+                                                        expert_weight,
+                                                        DS4_SWIGLU_CLAMP_EXP,
+                                                        mid_all,
+                                                        xq,
+                                                        midq,
+                                                        expert_in_dim,
+                                                        expert_mid_dim,
+                                                        down_in_dim,
+                                                        routed_out_dim);
+        ok = ds4_gpu_tensor_write(g->routed_out, 0, cpu_routed, (uint64_t)DS4_N_EMBD * sizeof(cpu_routed[0])) != 0;
+    }
+    free(midq);
+    free(xq);
+    free(mid_all);
+    free(cpu_routed);
+    free(cpu_ffn_norm);
+    return ok;
+}
+
+static bool metal_graph_prefill_routed_flashmoe(
+        ds4_gpu_graph            *g,
+        const ds4_layer_weights  *layer,
+        uint32_t                  il,
+        uint32_t                  n_tokens) {
+    const uint64_t expert_in_dim = layer->ffn_gate_exps->dim[0];
+    const uint64_t down_in_dim = layer->ffn_down_exps->dim[0];
+    float *norm = xmalloc((size_t)n_tokens * DS4_N_EMBD * sizeof(norm[0]));
+    float *moe = xmalloc((size_t)n_tokens * DS4_N_EMBD * sizeof(moe[0]));
+    int *selected = xmalloc((size_t)n_tokens * DS4_N_EXPERT_USED * sizeof(selected[0]));
+    float *weights = xmalloc((size_t)n_tokens * DS4_N_EXPERT_USED * sizeof(weights[0]));
+    bool ok = ds4_gpu_tensor_read(g->batch_ffn_norm, 0, norm, (uint64_t)n_tokens * DS4_N_EMBD * sizeof(norm[0])) != 0 &&
+              ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, (uint64_t)n_tokens * DS4_N_EXPERT_USED * sizeof(selected[0])) != 0 &&
+              ds4_gpu_tensor_read(g->batch_router_weights, 0, weights, (uint64_t)n_tokens * DS4_N_EXPERT_USED * sizeof(weights[0])) != 0;
+    if (ok) {
+        for (uint32_t t = 0; t < n_tokens; t++) {
+            float *mid_all = xmalloc((size_t)DS4_N_EXPERT_USED * down_in_dim * sizeof(mid_all[0]));
+            block_q8_K *xq = xmalloc((size_t)(expert_in_dim / QK_K) * sizeof(xq[0]));
+            block_q8_K *midq = xmalloc((size_t)DS4_N_EXPERT_USED * (down_in_dim / QK_K) * sizeof(midq[0]));
+            memset(moe + (uint64_t)t * DS4_N_EMBD, 0, (size_t)DS4_N_EMBD * sizeof(float));
+            ds4_quantize_row_q8_K(norm + (uint64_t)t * DS4_N_EMBD, xq, (int64_t)expert_in_dim);
+            layer_routed_moe_one_prealloc_flashmoe_selected(moe + (uint64_t)t * DS4_N_EMBD,
+                                                            layer,
+                                                            il,
+                                                            selected + (uint64_t)t * DS4_N_EXPERT_USED,
+                                                            weights + (uint64_t)t * DS4_N_EXPERT_USED,
+                                                            DS4_SWIGLU_CLAMP_EXP,
+                                                            mid_all,
+                                                            xq,
+                                                            midq,
+                                                            expert_in_dim,
+                                                            layer->ffn_gate_exps->dim[1],
+                                                            down_in_dim,
+                                                            layer->ffn_down_exps->dim[1]);
+            free(midq);
+            free(xq);
+            free(mid_all);
+        }
+        ok = ds4_gpu_tensor_write(g->batch_routed_out,
+                                  0,
+                                  moe,
+                                  (uint64_t)n_tokens * DS4_N_EMBD * sizeof(moe[0])) != 0;
+    }
+    free(weights);
+    free(selected);
+    free(moe);
+    free(norm);
+    return ok;
+}
+#endif
 
 static void print_vec_stats(const char *name, const float *x, uint64_t n);
 
@@ -10138,7 +10274,11 @@ static bool metal_graph_encode_decode_layer(
         metal_graph_debug_dump_i32_tensor("ffn_moe_topk", g->router_selected, DS4_N_EXPERT_USED, il, pos);
         metal_graph_debug_dump_tensor("ffn_moe_weights_scaled", g->router_weights, DS4_N_EXPERT_USED, il, pos);
     }
-    if (ok) ok = ds4_gpu_routed_moe_one_tensor(g->routed_out,
+    if (ok) {
+        if (ds4_flashmoe_runtime_ready()) {
+            ok = metal_graph_decode_routed_flashmoe(g, layer, il);
+        } else {
+            ok = ds4_gpu_routed_moe_one_tensor(g->routed_out,
                                                  g->routed_gate,
                                                  g->routed_up,
                                                  g->routed_mid,
@@ -10156,6 +10296,8 @@ static bool metal_graph_encode_decode_layer(
                                                  (uint32_t)routed_out_dim,
                                                  g->router_selected, g->router_weights,
                                                  DS4_N_EXPERT_USED, DS4_SWIGLU_CLAMP_EXP, g->ffn_norm) != 0;
+        }
+    }
     DS4_METAL_PROFILE_DECODE_STAGE("routed_moe");
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_gate_clamped", g->routed_gate,
@@ -12886,7 +13028,12 @@ static bool metal_graph_encode_layer_ffn_batch(
     }
     DS4_METAL_PROFILE_FFN_STAGE("router");
 
-    if (ok) ok = ds4_gpu_routed_moe_batch_tensor(g->batch_routed_out,
+    if (ok) {
+        if (ds4_flashmoe_runtime_ready()) {
+            g->batch_routed_mid_is_f16 = false;
+            ok = metal_graph_prefill_routed_flashmoe(g, layer, il, n_tokens);
+        } else {
+            ok = ds4_gpu_routed_moe_batch_tensor(g->batch_routed_out,
                                                    g->batch_routed_gate,
                                                    g->batch_routed_up,
                                                    g->batch_routed_mid,
@@ -12912,6 +13059,8 @@ static bool metal_graph_encode_layer_ffn_batch(
                                                    g->batch_ffn_norm,
                                                    n_tokens,
                                                    &g->batch_routed_mid_is_f16) != 0;
+        }
+    }
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_gate_clamped", g->batch_routed_gate,
                                       (uint64_t)n_tokens * DS4_N_EXPERT_USED * down_in_dim, il, pos0);
