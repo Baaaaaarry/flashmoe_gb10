@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashmoe-vllm-plugin"
+version = "0.1.0"
+description = "GB10-oriented FlashMoE runtime and vLLM plugin scaffolding"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+flashmoe-train-policy = "flashmoe_vllm_plugin.train_policy:main"
+flashmoe-train-predictor = "flashmoe_vllm_plugin.train_predictor:main"
+flashmoe-ablate = "flashmoe_vllm_plugin.ablate:main"
+flashmoe-build-cache-dataset = "flashmoe_vllm_plugin.build_cache_dataset:main"
+flashmoe-build-expert-manifest = "flashmoe_vllm_plugin.build_expert_manifest:main"
+flashmoe-export-qwen-experts = "flashmoe_vllm_plugin.export_qwen_experts:main"
+flashmoe-generate-synthetic-trace = "flashmoe_vllm_plugin.generate_synthetic_trace:main"
+flashmoe-init-config = "flashmoe_vllm_plugin.init_config:main"
+flashmoe-replay-streaming = "flashmoe_vllm_plugin.replay_streaming:main"
+
+[project.entry-points."vllm.general_plugins"]
+flashmoe_vllm = "flashmoe_vllm_plugin.plugin:register"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]

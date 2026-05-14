@@ -1,14 +1,26 @@
-/ds4
-/ds4-server
-/ds4-bench
-/ds4_native
-/ds4_server_test
-/ds4_test
-/ds4flash.gguf
-/TODO.md
-/gguf/
-*.o
-*.dSYM/
-/misc/
-.*.swp
 .DS_Store
+
+# local helper state
+.claude/
+.codex-backups/
+repo-anemll/
+repo-danveloper/
+
+# gb10_flashmoe build outputs
+gb10_flashmoe/build/
+gb10_flashmoe/build*/
+gb10_flashmoe/**/__pycache__/
+gb10_flashmoe/.DS_Store
+
+# ds4_gb10 local binaries and build artifacts
+ds4_gb10/ds4
+ds4_gb10/ds4-server
+ds4_gb10/ds4-bench
+ds4_gb10/ds4_native
+ds4_gb10/ds4_server_test
+ds4_gb10/ds4_test
+ds4_gb10/*.o
+ds4_gb10/*.dSYM/
+ds4_gb10/ds4flash.gguf
+ds4_gb10/gguf/
+
