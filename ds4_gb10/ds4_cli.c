@@ -1,8 +1,6 @@
 #include "ds4.h"
 #include "linenoise.h"
-#ifndef DS4_NO_GPU
 #include "ds4_gpu.h"
-#endif
 
 /* ds4 CLI.
  *

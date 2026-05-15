@@ -107,7 +107,7 @@ endif
 ds4.o: ds4.c ds4.h ds4_gpu.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
-ds4_cli.o: ds4_cli.c ds4.h linenoise.h
+ds4_cli.o: ds4_cli.c ds4.h ds4_gpu.h linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_cli.c
 
 ds4_server.o: ds4_server.c ds4.h rax.h
@@ -131,7 +131,7 @@ linenoise.o: linenoise.c linenoise.h
 ds4_cpu.o: ds4.c ds4.h ds4_gpu.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4.c
 
-ds4_cli_cpu.o: ds4_cli.c ds4.h linenoise.h
+ds4_cli_cpu.o: ds4_cli.c ds4.h ds4_gpu.h linenoise.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_cli.c
 
 ds4_server_cpu.o: ds4_server.c ds4.h rax.h
