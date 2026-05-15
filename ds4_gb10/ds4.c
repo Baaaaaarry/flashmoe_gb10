@@ -14737,13 +14737,22 @@ ds4_context_memory ds4_context_memory_estimate(ds4_backend backend, int ctx_size
             const uint32_t ratio = ds4_layer_compress_ratio(il);
             if (ratio == 0) continue;
             const uint32_t layer_comp_cap = ctx / ratio + 2u;
-            m.compressed_bytes += (uint64_t)layer_comp_cap *
-                                  DS4_N_HEAD_DIM *
-                                  sizeof(float);
+            const uint64_t attn_comp_bytes = (uint64_t)layer_comp_cap *
+                                             DS4_N_HEAD_DIM *
+                                             sizeof(float);
+            m.compressed_bytes += attn_comp_bytes;
+            if (ratio == 4) m.csa_kv_bytes += attn_comp_bytes;
+            else m.hca_kv_bytes += attn_comp_bytes;
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
             if (ratio == 4) {
-                m.compressed_bytes += (uint64_t)layer_comp_cap *
-                                      DS4_N_INDEXER_HEAD_DIM *
-                                      sizeof(float);
+                const uint64_t index_comp_bytes = (uint64_t)layer_comp_cap *
+                                                  DS4_N_INDEXER_HEAD_DIM *
+                                                  sizeof(float);
+                m.compressed_bytes += index_comp_bytes;
+                m.csa_index_bytes += index_comp_bytes;
+                m.index_state_bytes += layer_index_state_bytes(ratio);
+                m.index_state_bytes += layer_index_state_bytes(ratio);
             }
         }
         m.scratch_bytes = 2ull *
@@ -14761,13 +14770,22 @@ ds4_context_memory ds4_context_memory_estimate(ds4_backend backend, int ctx_size
             if (ratio == 0) continue;
             const uint32_t comp_cap = ctx / ratio + 2u;
             if (ratio == 4) m.comp_cap = comp_cap;
-            m.compressed_bytes += (uint64_t)comp_cap *
-                                  DS4_N_HEAD_DIM *
-                                  sizeof(float);
+            const uint64_t attn_comp_bytes = (uint64_t)comp_cap *
+                                             DS4_N_HEAD_DIM *
+                                             sizeof(float);
+            m.compressed_bytes += attn_comp_bytes;
+            if (ratio == 4) m.csa_kv_bytes += attn_comp_bytes;
+            else m.hca_kv_bytes += attn_comp_bytes;
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
             if (ratio == 4) {
-                m.compressed_bytes += (uint64_t)comp_cap *
-                                      DS4_N_INDEXER_HEAD_DIM *
-                                      sizeof(float);
+                const uint64_t index_comp_bytes = (uint64_t)comp_cap *
+                                                  DS4_N_INDEXER_HEAD_DIM *
+                                                  sizeof(float);
+                m.compressed_bytes += index_comp_bytes;
+                m.csa_index_bytes += index_comp_bytes;
+                m.index_state_bytes += layer_index_state_bytes(ratio);
+                m.index_state_bytes += layer_index_state_bytes(ratio);
             }
         }
         if (m.comp_cap == 0) m.comp_cap = ctx / 4u + 2u;
@@ -14776,7 +14794,9 @@ ds4_context_memory ds4_context_memory_estimate(ds4_backend backend, int ctx_size
                           ((uint64_t)m.comp_cap * sizeof(bool));
     }
 
-    m.total_bytes = m.raw_bytes + m.compressed_bytes + m.scratch_bytes;
+    m.total_bytes = m.raw_bytes + m.compressed_bytes +
+                    m.attn_state_bytes + m.index_state_bytes +
+                    m.scratch_bytes;
     return m;
 }
 

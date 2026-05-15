@@ -76,6 +76,11 @@ typedef struct {
     uint64_t total_bytes;
     uint64_t raw_bytes;
     uint64_t compressed_bytes;
+    uint64_t csa_kv_bytes;
+    uint64_t csa_index_bytes;
+    uint64_t hca_kv_bytes;
+    uint64_t attn_state_bytes;
+    uint64_t index_state_bytes;
     uint64_t scratch_bytes;
     uint32_t prefill_cap;
     uint32_t raw_cap;

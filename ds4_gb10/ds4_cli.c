@@ -53,10 +53,13 @@ typedef struct {
     cli_generation_options gen;
     char *prompt_owned;
     char *runtime_monitor_log_owned;
+    char *kv_cache_contexts_owned;
     bool inspect;
+    bool kv_cache_report;
     bool runtime_monitor;
     float runtime_monitor_interval;
     const char *runtime_monitor_log_path;
+    const char *kv_cache_contexts;
     const char *flashmoe_export_dir;
     const char *flashmoe_export_manifest;
 } cli_config;
@@ -179,6 +182,10 @@ static void usage(FILE *fp) {
         "Diagnostics:\n"
         "  --inspect\n"
         "      Load the model and print a summary only.\n"
+        "  --kv-cache-report\n"
+        "      Print theoretical and measured KV/context buffer usage for one or more context sizes.\n"
+        "  --kv-cache-contexts LIST\n"
+        "      Comma-separated context sizes for --kv-cache-report. Default: 1024,8192,65536,131072,1048576\n"
         "  --runtime-monitor\n"
         "      Print periodic runtime metrics for RSS/HWM, process I/O, CUDA cache, and GPU load.\n"
         "  --runtime-monitor-interval F\n"
@@ -1589,6 +1596,119 @@ static char *read_prompt_file(const char *path, bool fatal) {
     return buf;
 }
 
+static int parse_ctx_list(const char *spec, int **out_v, int *out_n) {
+    if (!spec || !out_v || !out_n) return 1;
+    char *tmp = strdup(spec);
+    if (!tmp) return 1;
+    int cap = 8, n = 0;
+    int *vals = malloc((size_t)cap * sizeof(vals[0]));
+    if (!vals) {
+        free(tmp);
+        return 1;
+    }
+    char *save = NULL;
+    for (char *tok = strtok_r(tmp, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        tok = trim_inplace(tok);
+        if (!tok[0]) continue;
+        int v = parse_int(tok, "--kv-cache-contexts");
+        if (n == cap) {
+            cap *= 2;
+            int *next = realloc(vals, (size_t)cap * sizeof(vals[0]));
+            if (!next) {
+                free(vals);
+                free(tmp);
+                return 1;
+            }
+            vals = next;
+        }
+        vals[n++] = v;
+    }
+    free(tmp);
+    if (n == 0) {
+        free(vals);
+        return 1;
+    }
+    *out_v = vals;
+    *out_n = n;
+    return 0;
+}
+
+static double gib_bytes(uint64_t bytes) {
+    return (double)bytes / 1073741824.0;
+}
+
+static int run_kv_cache_report(ds4_engine *engine, const cli_config *cfg) {
+    static const char *default_ctxs = "1024,8192,65536,131072,1048576";
+    const char *ctx_spec = cfg->kv_cache_contexts ? cfg->kv_cache_contexts : default_ctxs;
+    int *ctxs = NULL;
+    int n_ctx = 0;
+    if (parse_ctx_list(ctx_spec, &ctxs, &n_ctx) != 0) {
+        fprintf(stderr, "ds4: failed to parse --kv-cache-contexts\n");
+        return 1;
+    }
+
+    ds4_tokens prompt = {0};
+    const char *bench_prompt = cfg->gen.prompt ? cfg->gen.prompt : "hi";
+    cli_generation_options gen = cfg->gen;
+    gen.prompt = bench_prompt;
+    build_prompt(engine, &gen, &prompt);
+
+    printf("ctx,raw_gib,csa_kv_gib,csa_index_gib,hca_kv_gib,attn_state_gib,index_state_gib,scratch_gib,total_gib,create_delta_gib,prefill_delta_gib,free_after_close_gib\n");
+
+    for (int i = 0; i < n_ctx; i++) {
+        int ctx = ctxs[i];
+        ds4_context_memory m = ds4_context_memory_estimate(cfg->engine.backend, ctx);
+        double create_delta = -1.0;
+        double prefill_delta = -1.0;
+        double free_after_close = -1.0;
+
+#ifndef DS4_NO_GPU
+        if (cfg->engine.backend == DS4_BACKEND_CUDA) {
+            ds4_gpu_runtime_stats s0, s1, s2, s3;
+            memset(&s0, 0, sizeof(s0));
+            memset(&s1, 0, sizeof(s1));
+            memset(&s2, 0, sizeof(s2));
+            memset(&s3, 0, sizeof(s3));
+            (void)ds4_gpu_get_runtime_stats(&s0);
+
+            ds4_session *session = NULL;
+            if (ds4_session_create(&session, engine, ctx) == 0) {
+                (void)ds4_gpu_get_runtime_stats(&s1);
+                create_delta = gib_bytes(s0.free_bytes > s1.free_bytes ? (s0.free_bytes - s1.free_bytes) : 0);
+                if (prompt.len < ctx) {
+                    char err[160];
+                    if (ds4_session_sync(session, &prompt, err, sizeof(err)) == 0) {
+                        (void)ds4_gpu_get_runtime_stats(&s2);
+                        prefill_delta = gib_bytes(s0.free_bytes > s2.free_bytes ? (s0.free_bytes - s2.free_bytes) : 0);
+                    }
+                }
+                ds4_session_free(session);
+                (void)ds4_gpu_get_runtime_stats(&s3);
+                free_after_close = gib_bytes(s3.free_bytes);
+            }
+        }
+#endif
+
+        printf("%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+               ctx,
+               gib_bytes(m.raw_bytes),
+               gib_bytes(m.csa_kv_bytes),
+               gib_bytes(m.csa_index_bytes),
+               gib_bytes(m.hca_kv_bytes),
+               gib_bytes(m.attn_state_bytes),
+               gib_bytes(m.index_state_bytes),
+               gib_bytes(m.scratch_bytes),
+               gib_bytes(m.total_bytes),
+               create_delta,
+               prefill_delta,
+               free_after_close);
+    }
+
+    ds4_tokens_free(&prompt);
+    free(ctxs);
+    return 0;
+}
+
 static cli_config parse_options(int argc, char **argv) {
     cli_config c = {
         .engine = {
@@ -1707,6 +1827,11 @@ static cli_config parse_options(int argc, char **argv) {
             exit(2);
         } else if (!strcmp(arg, "--inspect")) {
             c.inspect = true;
+        } else if (!strcmp(arg, "--kv-cache-report")) {
+            c.kv_cache_report = true;
+        } else if (!strcmp(arg, "--kv-cache-contexts")) {
+            c.kv_cache_contexts_owned = strdup(need_arg(&i, argc, argv, arg));
+            c.kv_cache_contexts = c.kv_cache_contexts_owned;
         } else if (!strcmp(arg, "--runtime-monitor")) {
             c.runtime_monitor = true;
         } else if (!strcmp(arg, "--runtime-monitor-interval")) {
@@ -1790,6 +1915,9 @@ int main(int argc, char **argv) {
                                             cfg.flashmoe_export_dir,
                                             cfg.flashmoe_export_manifest);
         }
+    } else if (cfg.kv_cache_report) {
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "kv-cache-report");
+        rc = run_kv_cache_report(engine, &cfg);
     } else if (cfg.flashmoe_export_dir) {
         cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "flashmoe-export");
         rc = ds4_engine_export_flashmoe(engine,
@@ -1812,6 +1940,7 @@ int main(int argc, char **argv) {
     ds4_engine_close(engine);
     cli_runtime_monitor_stop(&monitor);
     g_cli_runtime_monitor = NULL;
+    free(cfg.kv_cache_contexts_owned);
     free(cfg.runtime_monitor_log_owned);
     free(cfg.prompt_owned);
     return rc;
