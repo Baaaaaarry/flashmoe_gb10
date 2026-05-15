@@ -52,9 +52,11 @@ typedef struct {
     ds4_engine_options engine;
     cli_generation_options gen;
     char *prompt_owned;
+    char *runtime_monitor_log_owned;
     bool inspect;
     bool runtime_monitor;
     float runtime_monitor_interval;
+    const char *runtime_monitor_log_path;
     const char *flashmoe_export_dir;
     const char *flashmoe_export_manifest;
 } cli_config;
@@ -70,6 +72,9 @@ typedef struct {
     int current;
     int total;
     ds4_backend backend;
+    double start_ts;
+    FILE *log_fp;
+    char log_path[PATH_MAX];
 } cli_runtime_monitor;
 
 static double cli_now_sec(void);
@@ -178,6 +183,8 @@ static void usage(FILE *fp) {
         "      Print periodic runtime metrics for RSS/HWM, process I/O, CUDA cache, and GPU load.\n"
         "  --runtime-monitor-interval F\n"
         "      Runtime monitor sampling interval in seconds. Default: 1.0\n"
+        "  --runtime-monitor-log FILE\n"
+        "      Save runtime monitor samples as CSV. Default with --runtime-monitor: auto-create ds4-runtime-*.csv\n"
         "  --flashmoe-export-dir DIR\n"
         "      Export routed experts into a FlashMoE pack directory.\n"
         "  --flashmoe-export-manifest FILE\n"
@@ -361,6 +368,50 @@ static void cli_runtime_monitor_set_progress(cli_runtime_monitor *m, int current
     pthread_mutex_unlock(&m->mu);
 }
 
+static void cli_runtime_monitor_log_sample(
+        cli_runtime_monitor *m,
+        double elapsed_s,
+        const char *phase,
+        int current,
+        int total,
+        uint64_t rss_kib,
+        uint64_t hwm_kib,
+        double read_mibs,
+        double write_mibs,
+        double cuda_model_gib,
+        double q8f16_gib,
+        double q8f32_gib,
+        double cuda_free_gib,
+        double cuda_total_gib,
+        int gpu_util,
+        int mem_util,
+        double gpu_mem_used_gib,
+        double gpu_mem_total_gib,
+        double power_w) {
+    if (!m || !m->log_fp) return;
+    fprintf(m->log_fp,
+            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f\n",
+            elapsed_s,
+            phase ? phase : "idle",
+            current,
+            total,
+            (double)rss_kib / 1048576.0,
+            (double)hwm_kib / 1048576.0,
+            read_mibs,
+            write_mibs,
+            cuda_model_gib,
+            q8f16_gib,
+            q8f32_gib,
+            cuda_free_gib,
+            cuda_total_gib,
+            gpu_util,
+            mem_util,
+            gpu_mem_used_gib,
+            gpu_mem_total_gib,
+            power_w);
+    fflush(m->log_fp);
+}
+
 static void *cli_runtime_monitor_main(void *arg) {
     cli_runtime_monitor *m = arg;
     uint64_t last_read = 0, last_write = 0;
@@ -397,26 +448,32 @@ static void *cli_runtime_monitor_main(void *arg) {
 
         char cuda_buf[256];
         cuda_buf[0] = '\0';
+        double cuda_model_gib = -1.0, q8f16_gib = -1.0, q8f32_gib = -1.0, cuda_free_gib = -1.0, cuda_total_gib = -1.0;
 #ifndef DS4_NO_GPU
         if (m->backend == DS4_BACKEND_CUDA) {
             ds4_gpu_runtime_stats s;
             if (ds4_gpu_get_runtime_stats(&s)) {
+                cuda_model_gib = (double)s.model_cache_bytes / 1073741824.0;
+                q8f16_gib = (double)s.q8_f16_cache_bytes / 1073741824.0;
+                q8f32_gib = (double)s.q8_f32_cache_bytes / 1073741824.0;
+                cuda_free_gib = (double)s.free_bytes / 1073741824.0;
+                cuda_total_gib = (double)s.total_bytes / 1073741824.0;
                 snprintf(cuda_buf,
                          sizeof(cuda_buf),
                          " cuda_model=%.2fGiB q8f16=%.2fGiB q8f32=%.2fGiB cuda_free=%.2fGiB cuda_total=%.2fGiB",
-                         (double)s.model_cache_bytes / 1073741824.0,
-                         (double)s.q8_f16_cache_bytes / 1073741824.0,
-                         (double)s.q8_f32_cache_bytes / 1073741824.0,
-                         (double)s.free_bytes / 1073741824.0,
-                         (double)s.total_bytes / 1073741824.0);
+                         cuda_model_gib,
+                         q8f16_gib,
+                         q8f32_gib,
+                         cuda_free_gib,
+                         cuda_total_gib);
             }
         }
 #endif
         char smi_buf[192];
         smi_buf[0] = '\0';
+        int gpu_util = -1, mem_util = -1;
+        double mem_used_mb = -1.0, mem_total_mb = -1.0, power_w = -1.0;
         if (m->backend == DS4_BACKEND_CUDA) {
-            int gpu_util = -1, mem_util = -1;
-            double mem_used_mb = 0.0, mem_total_mb = 0.0, power_w = 0.0;
             if (cli_query_nvidia_smi(&gpu_util, &mem_util, &mem_used_mb, &mem_total_mb, &power_w)) {
                 snprintf(smi_buf,
                          sizeof(smi_buf),
@@ -428,6 +485,27 @@ static void *cli_runtime_monitor_main(void *arg) {
                          power_w);
             }
         }
+
+        cli_runtime_monitor_log_sample(
+            m,
+            now - m->start_ts,
+            phase,
+            current,
+            total,
+            rss_kib,
+            hwm_kib,
+            read_mibs,
+            write_mibs,
+            cuda_model_gib,
+            q8f16_gib,
+            q8f32_gib,
+            cuda_free_gib,
+            cuda_total_gib,
+            gpu_util,
+            mem_util,
+            mem_used_mb >= 0.0 ? mem_used_mb / 1024.0 : -1.0,
+            mem_total_mb >= 0.0 ? mem_total_mb / 1024.0 : -1.0,
+            power_w);
 
         fprintf(stderr,
                 "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
@@ -444,6 +522,18 @@ static void *cli_runtime_monitor_main(void *arg) {
     return NULL;
 }
 
+static char *cli_runtime_monitor_default_log_path(void) {
+    time_t now = time(NULL);
+    struct tm tmv;
+    if (!localtime_r(&now, &tmv)) return NULL;
+    char stamp[64];
+    if (strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tmv) == 0) return NULL;
+    char *path = malloc(PATH_MAX);
+    if (!path) return NULL;
+    snprintf(path, PATH_MAX, "ds4-runtime-%s.csv", stamp);
+    return path;
+}
+
 static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *cfg) {
     memset(m, 0, sizeof(*m));
     if (!cfg->runtime_monitor) return;
@@ -451,6 +541,28 @@ static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *
     m->interval_s = cfg->runtime_monitor_interval > 0.0f ? cfg->runtime_monitor_interval : 1.0f;
     m->backend = cfg->engine.backend;
     m->phase = "startup";
+    m->start_ts = cli_now_sec();
+    const char *log_path = cfg->runtime_monitor_log_path;
+    if (log_path && log_path[0]) {
+        snprintf(m->log_path, sizeof(m->log_path), "%s", log_path);
+    } else {
+        char *auto_path = cli_runtime_monitor_default_log_path();
+        if (auto_path) {
+            snprintf(m->log_path, sizeof(m->log_path), "%s", auto_path);
+            free(auto_path);
+        }
+    }
+    if (m->log_path[0]) {
+        m->log_fp = fopen(m->log_path, "wb");
+        if (m->log_fp) {
+            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w\n", m->log_fp);
+            fflush(m->log_fp);
+            fprintf(stderr, "ds4: runtime-monitor logging to %s\n", m->log_path);
+        } else {
+            fprintf(stderr, "ds4: runtime-monitor failed to open log file: %s\n", m->log_path);
+            m->log_path[0] = '\0';
+        }
+    }
     pthread_mutex_init(&m->mu, NULL);
     if (pthread_create(&m->thread, NULL, cli_runtime_monitor_main, m) == 0) {
         m->started = true;
@@ -464,6 +576,11 @@ static void cli_runtime_monitor_stop(cli_runtime_monitor *m) {
     if (!m || !m->enabled) return;
     m->stop = 1;
     if (m->started) (void)pthread_join(m->thread, NULL);
+    if (m->log_fp) {
+        fprintf(stderr, "ds4: runtime-monitor log saved to %s\n", m->log_path);
+        fclose(m->log_fp);
+        m->log_fp = NULL;
+    }
     pthread_mutex_destroy(&m->mu);
     memset(m, 0, sizeof(*m));
 }
@@ -1595,6 +1712,9 @@ static cli_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--runtime-monitor-interval")) {
             c.runtime_monitor = true;
             c.runtime_monitor_interval = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.05f, 3600.0f);
+        } else if (!strcmp(arg, "--runtime-monitor-log")) {
+            c.runtime_monitor = true;
+            c.runtime_monitor_log_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--flashmoe-export-dir")) {
             c.flashmoe_export_dir = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--flashmoe-export-manifest")) {
@@ -1692,6 +1812,7 @@ int main(int argc, char **argv) {
     ds4_engine_close(engine);
     cli_runtime_monitor_stop(&monitor);
     g_cli_runtime_monitor = NULL;
+    free(cfg.runtime_monitor_log_owned);
     free(cfg.prompt_owned);
     return rc;
 }
