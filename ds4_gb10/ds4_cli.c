@@ -670,17 +670,35 @@ typedef struct {
     token_printer *printer;
     cli_runtime_monitor *monitor;
     int generated;
+    int prompt_tokens;
     int max_tokens;
+    double t0;
+    double t_first;
+    double t1;
 } cli_emit_wrapper;
 
 static void cli_print_generated_token_monitored(void *ud, int token) {
     cli_emit_wrapper *w = ud;
-    if (w) w->generated++;
+    if (w) {
+        if (w->generated == 0) w->t_first = cli_now_sec();
+        w->generated++;
+    }
     if (w && w->monitor) {
         cli_runtime_monitor_set_phase(w->monitor, "generation");
         cli_runtime_monitor_set_progress(w->monitor, w->generated, w->max_tokens);
     }
     if (w && w->printer) print_generated_token(w->printer, token);
+}
+
+static void cli_generation_done_monitored(void *ud) {
+    cli_emit_wrapper *w = ud;
+    if (!w) return;
+    w->t1 = cli_now_sec();
+    if (w->monitor) {
+        cli_runtime_monitor_set_phase(w->monitor, "generation");
+        cli_runtime_monitor_set_progress(w->monitor, w->generated, w->max_tokens);
+    }
+    if (w->printer) generation_done(w->printer);
 }
 
 static void build_prompt(ds4_engine *engine, const cli_generation_options *gen, ds4_tokens *out) {
@@ -1020,17 +1038,29 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
         cli_emit_wrapper emit = {
             .printer = &printer,
             .monitor = g_cli_runtime_monitor,
+            .prompt_tokens = prompt.len,
             .max_tokens = cfg->gen.n_predict,
         };
-        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
-        cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, cfg->gen.n_predict);
+        emit.t0 = cli_now_sec();
         rc = ds4_engine_generate_argmax(engine, &prompt, cfg->gen.n_predict,
                                         cfg->gen.ctx_size,
                                         cli_print_generated_token_monitored,
-                                        generation_done,
+                                        cli_generation_done_monitored,
                                         &emit,
                                         cli_prefill_progress_cb,
                                         &progress);
+        if (emit.t1 == 0.0) emit.t1 = cli_now_sec();
+        int effective_prefill = progress.input_tokens;
+        int effective_generated = emit.generated;
+        if (rc == 0) {
+            const double prefill_s = emit.t_first > emit.t0 ? emit.t_first - emit.t0 : 0.0;
+            const double decode_s = emit.t1 > emit.t_first ? emit.t1 - emit.t_first : 0.0;
+            ds4_log(stderr,
+                    DS4_LOG_TIMING,
+                    "ds4: prefill: %.2f t/s, generation: %.2f t/s\n",
+                    prefill_s > 0.0 ? (double)effective_prefill / prefill_s : 0.0,
+                    decode_s > 0.0 ? (double)effective_generated / decode_s : 0.0);
+        }
     }
 
     ds4_tokens_free(&prompt);
