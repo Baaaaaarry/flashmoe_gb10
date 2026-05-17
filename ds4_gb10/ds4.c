@@ -16682,6 +16682,89 @@ static uint32_t session_cpu_comp_cap(const ds4_session *s) {
     return (uint32_t)s->ctx_size;
 }
 
+ds4_context_memory ds4_session_context_memory(ds4_session *s) {
+    ds4_context_memory m = {0};
+    if (!s) return m;
+
+    m.prefill_cap = s->prefill_cap;
+    if (ds4_session_is_cpu(s)) {
+        m.raw_cap = ds4_default_raw_cap((uint32_t)s->ctx_size);
+        m.comp_cap = session_cpu_comp_cap(s);
+        m.raw_bytes = (uint64_t)DS4_N_LAYER *
+                      m.raw_cap *
+                      DS4_N_HEAD_DIM *
+                      sizeof(float);
+        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+            const ds4_layer_cache *layer = &s->cpu_cache.layer[il];
+            const uint32_t ratio = layer->compress_ratio;
+            if (ratio == 0) continue;
+            const uint64_t attn_comp_bytes = (uint64_t)layer->comp_cap *
+                                             DS4_N_HEAD_DIM *
+                                             sizeof(float);
+            m.compressed_bytes += attn_comp_bytes;
+            if (ratio == 4) m.csa_kv_bytes += attn_comp_bytes;
+            else m.hca_kv_bytes += attn_comp_bytes;
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            if (ratio == 4) {
+                const uint64_t index_comp_bytes = (uint64_t)layer->comp_cap *
+                                                  DS4_N_INDEXER_HEAD_DIM *
+                                                  sizeof(float);
+                m.compressed_bytes += index_comp_bytes;
+                m.csa_index_bytes += index_comp_bytes;
+                m.index_state_bytes += layer_index_state_bytes(ratio);
+                m.index_state_bytes += layer_index_state_bytes(ratio);
+                if (m.comp_cap == 0) m.comp_cap = layer->comp_cap;
+            }
+        }
+        if (m.comp_cap == 0) m.comp_cap = (uint32_t)s->ctx_size / 4u + 2u;
+        m.scratch_bytes = ((uint64_t)(m.raw_cap + m.comp_cap) * sizeof(float)) +
+                          ((uint64_t)m.comp_cap * sizeof(float)) +
+                          ((uint64_t)m.comp_cap * sizeof(bool));
+    } else {
+#ifndef DS4_NO_GPU
+        ds4_gpu_graph *g = &s->graph;
+        m.raw_cap = g->raw_cap;
+        m.comp_cap = g->comp_cap;
+        m.raw_bytes = (uint64_t)DS4_N_LAYER *
+                      g->raw_cap *
+                      DS4_N_HEAD_DIM *
+                      sizeof(float);
+        for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+            const uint32_t ratio = ds4_layer_compress_ratio(il);
+            if (ratio == 0) continue;
+            const uint32_t layer_comp_cap = g->layer_comp_cap[il];
+            const uint64_t attn_comp_bytes = (uint64_t)layer_comp_cap *
+                                             DS4_N_HEAD_DIM *
+                                             sizeof(float);
+            m.compressed_bytes += attn_comp_bytes;
+            if (ratio == 4) m.csa_kv_bytes += attn_comp_bytes;
+            else m.hca_kv_bytes += attn_comp_bytes;
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            if (ratio == 4) {
+                const uint64_t index_comp_bytes = (uint64_t)layer_comp_cap *
+                                                  DS4_N_INDEXER_HEAD_DIM *
+                                                  sizeof(float);
+                m.compressed_bytes += index_comp_bytes;
+                m.csa_index_bytes += index_comp_bytes;
+                m.index_state_bytes += layer_index_state_bytes(ratio);
+                m.index_state_bytes += layer_index_state_bytes(ratio);
+            }
+        }
+        m.scratch_bytes = 2ull *
+                          m.comp_cap *
+                          m.prefill_cap *
+                          sizeof(float);
+#endif
+    }
+
+    m.total_bytes = m.raw_bytes + m.compressed_bytes +
+                    m.attn_state_bytes + m.index_state_bytes +
+                    m.scratch_bytes;
+    return m;
+}
+
 static uint64_t session_cpu_payload_live_tensor_bytes(const ds4_session *s) {
     uint64_t bytes = 0;
     const uint32_t raw_live = session_cpu_raw_live_rows(s);

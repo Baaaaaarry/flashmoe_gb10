@@ -1653,26 +1653,31 @@ static int run_kv_cache_report(ds4_engine *engine, const cli_config *cfg) {
     gen.prompt = bench_prompt;
     build_prompt(engine, &gen, &prompt);
 
-    printf("ctx,raw_gib,csa_kv_gib,csa_index_gib,hca_kv_gib,attn_state_gib,index_state_gib,scratch_gib,total_gib,create_delta_gib,prefill_delta_gib,free_after_close_gib\n");
+    printf("ctx,raw_gib,csa_kv_gib,csa_index_gib,hca_kv_gib,attn_state_gib,index_state_gib,scratch_gib,total_gib,pure_kv_theory_gib,pure_kv_actual_gib,create_delta_gib,prefill_delta_gib,free_after_close_gib\n");
 
     for (int i = 0; i < n_ctx; i++) {
         int ctx = ctxs[i];
         ds4_context_memory m = ds4_context_memory_estimate(cfg->engine.backend, ctx);
+        const double pure_kv_theory = gib_bytes(m.raw_bytes + m.compressed_bytes +
+                                                m.attn_state_bytes + m.index_state_bytes);
+        double pure_kv_actual = -1.0;
         double create_delta = -1.0;
         double prefill_delta = -1.0;
         double free_after_close = -1.0;
 
+        ds4_session *session = NULL;
+        if (ds4_session_create(&session, engine, ctx) == 0) {
+            ds4_context_memory sm = ds4_session_context_memory(session);
+            pure_kv_actual = gib_bytes(sm.raw_bytes + sm.compressed_bytes +
+                                       sm.attn_state_bytes + sm.index_state_bytes);
 #ifndef DS4_NO_GPU
-        if (cfg->engine.backend == DS4_BACKEND_CUDA) {
-            ds4_gpu_runtime_stats s0, s1, s2, s3;
-            memset(&s0, 0, sizeof(s0));
-            memset(&s1, 0, sizeof(s1));
-            memset(&s2, 0, sizeof(s2));
-            memset(&s3, 0, sizeof(s3));
-            (void)ds4_gpu_get_runtime_stats(&s0);
-
-            ds4_session *session = NULL;
-            if (ds4_session_create(&session, engine, ctx) == 0) {
+            if (cfg->engine.backend == DS4_BACKEND_CUDA) {
+                ds4_gpu_runtime_stats s0, s1, s2, s3;
+                memset(&s0, 0, sizeof(s0));
+                memset(&s1, 0, sizeof(s1));
+                memset(&s2, 0, sizeof(s2));
+                memset(&s3, 0, sizeof(s3));
+                (void)ds4_gpu_get_runtime_stats(&s0);
                 (void)ds4_gpu_get_runtime_stats(&s1);
                 create_delta = gib_bytes(s0.free_bytes > s1.free_bytes ? (s0.free_bytes - s1.free_bytes) : 0);
                 if (prompt.len < ctx) {
@@ -1682,14 +1687,14 @@ static int run_kv_cache_report(ds4_engine *engine, const cli_config *cfg) {
                         prefill_delta = gib_bytes(s0.free_bytes > s2.free_bytes ? (s0.free_bytes - s2.free_bytes) : 0);
                     }
                 }
-                ds4_session_free(session);
                 (void)ds4_gpu_get_runtime_stats(&s3);
                 free_after_close = gib_bytes(s3.free_bytes);
             }
-        }
 #endif
+            ds4_session_free(session);
+        }
 
-        printf("%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+        printf("%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
                ctx,
                gib_bytes(m.raw_bytes),
                gib_bytes(m.csa_kv_bytes),
@@ -1699,6 +1704,8 @@ static int run_kv_cache_report(ds4_engine *engine, const cli_config *cfg) {
                gib_bytes(m.index_state_bytes),
                gib_bytes(m.scratch_bytes),
                gib_bytes(m.total_bytes),
+               pure_kv_theory,
+               pure_kv_actual,
                create_delta,
                prefill_delta,
                free_after_close);
