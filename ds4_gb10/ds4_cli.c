@@ -1199,7 +1199,7 @@ static void cli_print_generated_token_monitored(void *ud, int token) {
         w->generated++;
     }
     if (w && w->monitor) {
-        cli_runtime_monitor_set_phase(w->monitor, "generation");
+        cli_runtime_monitor_set_phase(w->monitor, "decode");
         cli_runtime_monitor_set_progress(w->monitor, w->generated, w->max_tokens);
     }
     if (w && w->printer) print_generated_token(w->printer, token);
@@ -1210,7 +1210,7 @@ static void cli_generation_done_monitored(void *ud) {
     if (!w) return;
     w->t1 = cli_now_sec();
     if (w->monitor) {
-        cli_runtime_monitor_set_phase(w->monitor, "generation");
+        cli_runtime_monitor_set_phase(w->monitor, "decode");
         cli_runtime_monitor_set_progress(w->monitor, w->generated, w->max_tokens);
     }
     if (w->printer) generation_done(w->printer);
@@ -1250,6 +1250,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
     };
 
     const double t_prefill0 = cli_now_sec();
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "prefill");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, prompt->len);
     ds4_session_set_progress(session, cli_prefill_progress_cb, &progress);
     if (ds4_session_sync(session, prompt, err, sizeof(err)) != 0) {
         ds4_session_set_progress(session, NULL, NULL);
@@ -1269,7 +1271,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const double t_decode0 = cli_now_sec();
-    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "decode");
     cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, max_tokens);
     while (generated < max_tokens && !cli_interrupt_requested()) {
         int token = ds4_session_sample(session, cfg->gen.temperature, 0, cfg->gen.top_p, 0.0f, &rng);
@@ -1314,7 +1316,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
             fflush(stdout);
             free(piece);
             generated++;
-            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "decode");
             cli_runtime_monitor_set_progress(g_cli_runtime_monitor, generated, max_tokens);
             if (generated >= max_tokens) break;
         }
@@ -1418,6 +1420,8 @@ static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4
         .monitor = g_cli_runtime_monitor,
     };
     ds4_session_set_progress(session, cli_prefill_progress_cb, &progress);
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "prefill");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, prompt->len);
     if (ds4_session_sync(session, prompt, err, sizeof(err)) != 0) {
         ds4_session_set_progress(session, NULL, NULL);
         fprintf(stderr, "ds4: prompt processing failed: %s\n", err);
@@ -1449,7 +1453,7 @@ static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4
     int room = ds4_session_ctx(session) - ds4_session_pos(session);
     if (room <= 1) max_tokens = 0;
     else if (max_tokens > room - 1) max_tokens = room - 1;
-    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "decode");
     cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, max_tokens);
     for (; generated < max_tokens; generated++) {
         int n = ds4_session_top_logprobs(session, scores, k);
@@ -1474,7 +1478,7 @@ static int run_logprob_dump(ds4_engine *engine, const cli_config *cfg, const ds4
             ds4_session_free(session);
             return 1;
         }
-        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "decode");
         cli_runtime_monitor_set_progress(g_cli_runtime_monitor, generated + 1, max_tokens);
     }
     fputs("\n  ]\n}\n", fp);
@@ -1557,6 +1561,8 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
             .max_tokens = cfg->gen.n_predict,
         };
         emit.t0 = cli_now_sec();
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "prefill");
+        cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, prompt.len);
         rc = ds4_engine_generate_argmax(engine, &prompt, cfg->gen.n_predict,
                                         cfg->gen.ctx_size,
                                         cli_print_generated_token_monitored,
@@ -1728,6 +1734,8 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
         .monitor = g_cli_runtime_monitor,
     };
     const double t_prefill0 = cli_now_sec();
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "prefill");
+    cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, suffix);
     ds4_session_set_progress(chat->session, cli_prefill_progress_cb, &progress);
     if (ds4_session_sync(chat->session, &chat->transcript, err, sizeof(err)) != 0) {
         ds4_session_set_progress(chat->session, NULL, NULL);
@@ -1756,7 +1764,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
         ((uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32) ^ (uint64_t)clock());
     int generated = 0;
     const double t_decode0 = cli_now_sec();
-    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+    cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "decode");
     cli_runtime_monitor_set_progress(g_cli_runtime_monitor, 0, max_tokens);
     while (generated < max_tokens && !cli_interrupt_requested()) {
         int token = ds4_session_sample(chat->session,
@@ -1805,7 +1813,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
             fflush(stdout);
             free(piece);
             generated++;
-            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "generation");
+            cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "decode");
             cli_runtime_monitor_set_progress(g_cli_runtime_monitor, generated, max_tokens);
             if (generated >= max_tokens) break;
         }

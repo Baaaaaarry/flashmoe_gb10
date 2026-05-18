@@ -86,11 +86,13 @@ def main(argv):
         raise SystemExit(f"usage: {argv[0]} MONITOR.csv")
     path = Path(argv[1])
     rows = load_rows(path)
+    phase_order = ["startup", "inspect", "prefill", "decode", "generation", "flashmoe-export", "kv-cache-report", "imatrix", "repl"]
     phases = []
     for row in rows:
         p = row.get("phase", "idle")
         if p not in phases:
             phases.append(p)
+    phases.sort(key=lambda p: phase_order.index(p) if p in phase_order else len(phase_order))
     print(f"runtime monitor summary: {path}")
     print(f"total samples: {len(rows)}")
     print("")

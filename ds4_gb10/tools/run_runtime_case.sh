@@ -13,7 +13,7 @@ shift 2
 PROMPT_FILE=${DS4_RUNTIME_CASE_PROMPT:-tests/runtime_case_qa.txt}
 TOKENS=${DS4_RUNTIME_CASE_TOKENS:-256}
 CTX=${DS4_RUNTIME_CASE_CTX:-8192}
-INTERVAL=${DS4_RUNTIME_MONITOR_INTERVAL:-1}
+INTERVAL=${DS4_RUNTIME_MONITOR_INTERVAL:-0.2}
 
 CSV="${OUT_PREFIX}.csv"
 SVG="${OUT_PREFIX}.svg"
@@ -34,7 +34,7 @@ SVG="${OUT_PREFIX}.svg"
 ./tools/analyze_runtime_monitor.py "$CSV"
 ./tools/plot_runtime_monitor.sh "$CSV"
 
-if [[ -f "${CSV%.csv}.svg" ]]; then
+if [[ -f "${CSV%.csv}.svg" && "${CSV%.csv}.svg" != "$SVG" ]]; then
   mv "${CSV%.csv}.svg" "$SVG"
 fi
 
