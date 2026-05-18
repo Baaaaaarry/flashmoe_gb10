@@ -26,6 +26,13 @@ def load_rows(path: Path):
             for key, value in row.items():
                 if key == "phase":
                     parsed[key] = value or "idle"
+                elif key.endswith("_name"):
+                    parsed[key] = value or ""
+                elif key.endswith("_tid"):
+                    try:
+                        parsed[key] = int(float(value))
+                    except Exception:
+                        parsed[key] = 0
                 elif key in ("current", "total", "gpu_util_pct", "gpu_mem_util_pct"):
                     try:
                         parsed[key] = int(value)

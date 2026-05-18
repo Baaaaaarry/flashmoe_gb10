@@ -15,6 +15,13 @@ def load_rows(path: Path):
             for k, v in row.items():
                 if k == "phase":
                     out[k] = v or "idle"
+                elif k.endswith("_name"):
+                    out[k] = v or ""
+                elif k.endswith("_tid"):
+                    try:
+                        out[k] = int(float(v))
+                    except Exception:
+                        out[k] = 0
                 elif k in ("current", "total", "gpu_util_pct", "gpu_mem_util_pct"):
                     try:
                         out[k] = int(v)

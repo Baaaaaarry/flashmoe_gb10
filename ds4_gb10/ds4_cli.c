@@ -422,6 +422,14 @@ static bool cli_query_nvidia_smi(
         double *sm_clock_mhz,
         double *mem_clock_mhz,
         double *temp_c) {
+    if (gpu_util) *gpu_util = -1;
+    if (mem_util) *mem_util = -1;
+    if (mem_used_mb) *mem_used_mb = -1.0;
+    if (mem_total_mb) *mem_total_mb = -1.0;
+    if (power_w) *power_w = -1.0;
+    if (sm_clock_mhz) *sm_clock_mhz = -1.0;
+    if (mem_clock_mhz) *mem_clock_mhz = -1.0;
+    if (temp_c) *temp_c = -1.0;
     FILE *fp = popen(
         "nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,clocks.current.sm,clocks.current.memory,temperature.gpu --format=csv,noheader,nounits 2>/dev/null",
         "r");
@@ -429,30 +437,36 @@ static bool cli_query_nvidia_smi(
     char line[256];
     bool ok = false;
     if (fgets(line, sizeof(line), fp)) {
-        int gu = -1, mu = -1;
-        double used = 0.0, total = 0.0, power = 0.0, sm = -1.0, mem = -1.0, temp = -1.0;
-        if (sscanf(line, " %d , %d , %lf , %lf , %lf , %lf , %lf , %lf",
-                   &gu, &mu, &used, &total, &power, &sm, &mem, &temp) == 8 ||
-            sscanf(line, " %d, %d, %lf, %lf, %lf, %lf, %lf, %lf",
-                   &gu, &mu, &used, &total, &power, &sm, &mem, &temp) == 8) {
-            if (gpu_util) *gpu_util = gu;
-            if (mem_util) *mem_util = mu;
-            if (mem_used_mb) *mem_used_mb = used;
-            if (mem_total_mb) *mem_total_mb = total;
-            if (power_w) *power_w = power;
-            if (sm_clock_mhz) *sm_clock_mhz = sm;
-            if (mem_clock_mhz) *mem_clock_mhz = mem;
-            if (temp_c) *temp_c = temp;
-            ok = true;
-        } else if (sscanf(line, " %d , %d , %lf , %lf , %lf", &gu, &mu, &used, &total, &power) == 5 ||
-                   sscanf(line, " %d, %d, %lf, %lf, %lf", &gu, &mu, &used, &total, &power) == 5) {
-            if (gpu_util) *gpu_util = gu;
-            if (mem_util) *mem_util = mu;
-            if (mem_used_mb) *mem_used_mb = used;
-            if (mem_total_mb) *mem_total_mb = total;
-            if (power_w) *power_w = power;
-            ok = true;
+        char *saveptr = NULL;
+        int field = 0;
+        for (char *tok = strtok_r(line, ",", &saveptr);
+             tok != NULL;
+             tok = strtok_r(NULL, ",", &saveptr), field++) {
+            while (*tok == ' ' || *tok == '\t') tok++;
+            size_t n = strlen(tok);
+            while (n > 0 && (tok[n - 1] == '\n' || tok[n - 1] == '\r' || tok[n - 1] == ' ' || tok[n - 1] == '\t')) {
+                tok[--n] = '\0';
+            }
+            char *end = NULL;
+            double v = strtod(tok, &end);
+            const bool valid = tok[0] != '\0' && end && end != tok && *end == '\0';
+            if (!valid) continue;
+            switch (field) {
+                case 0: if (gpu_util) *gpu_util = (int)llround(v); break;
+                case 1: if (mem_util) *mem_util = (int)llround(v); break;
+                case 2: if (mem_used_mb) *mem_used_mb = v; break;
+                case 3: if (mem_total_mb) *mem_total_mb = v; break;
+                case 4: if (power_w) *power_w = v; break;
+                case 5: if (sm_clock_mhz) *sm_clock_mhz = v; break;
+                case 6: if (mem_clock_mhz) *mem_clock_mhz = v; break;
+                case 7: if (temp_c) *temp_c = v; break;
+                default: break;
+            }
         }
+        ok = (gpu_util && *gpu_util >= 0) ||
+             (mem_used_mb && *mem_used_mb >= 0.0) ||
+             (power_w && *power_w >= 0.0) ||
+             (sm_clock_mhz && *sm_clock_mhz >= 0.0);
     }
     (void)pclose(fp);
     return ok;
