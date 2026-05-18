@@ -100,6 +100,12 @@ typedef struct {
 #define CLI_MAX_THREAD_SAMPLES 256
 #define CLI_TOP_THREAD_SLOTS 5
 
+typedef struct {
+    int pid;
+    char name[64];
+    uint64_t rss_kib;
+} cli_process_sample;
+
 static double cli_now_sec(void);
 
 static cli_runtime_monitor *g_cli_runtime_monitor;
@@ -335,6 +341,23 @@ static uint64_t cli_read_status_kib(const char *key) {
     return value;
 }
 
+static bool cli_read_system_memory_kib(uint64_t *total_kib, uint64_t *avail_kib) {
+    FILE *fp = fopen("/proc/meminfo", "rb");
+    if (!fp) return false;
+    char line[256];
+    uint64_t total = 0, avail = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long long kib = 0;
+        if (sscanf(line, "MemTotal: %llu kB", &kib) == 1) total = (uint64_t)kib;
+        else if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) avail = (uint64_t)kib;
+    }
+    fclose(fp);
+    if (total == 0) return false;
+    if (total_kib) *total_kib = total;
+    if (avail_kib) *avail_kib = avail;
+    return true;
+}
+
 static bool cli_read_proc_io(uint64_t *read_bytes, uint64_t *write_bytes) {
     FILE *fp = fopen("/proc/self/io", "rb");
     if (!fp) return false;
@@ -555,6 +578,84 @@ static void cli_read_thread_name(int tid, char *buf, size_t cap) {
     }
 }
 
+static uint64_t cli_read_pid_rss_kib(int pid) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    char line[256];
+    uint64_t value = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long long kib = 0;
+        if (sscanf(line, "VmRSS: %llu kB", &kib) == 1) {
+            value = (uint64_t)kib;
+            break;
+        }
+    }
+    fclose(fp);
+    return value;
+}
+
+static void cli_read_pid_name(int pid, char *buf, size_t cap) {
+    if (!buf || cap == 0) return;
+    buf[0] = '\0';
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        snprintf(buf, cap, "pid-%d", pid);
+        return;
+    }
+    if (!fgets(buf, (int)cap, fp)) {
+        snprintf(buf, cap, "pid-%d", pid);
+        fclose(fp);
+        return;
+    }
+    fclose(fp);
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+    for (size_t i = 0; i < n; i++) if (buf[i] == ',') buf[i] = '_';
+}
+
+static int cli_collect_top_processes(cli_process_sample *out, int out_cap) {
+    if (!out || out_cap <= 0) return 0;
+    DIR *dir = opendir("/proc");
+    if (!dir) return 0;
+    struct dirent *ent;
+    int count = 0;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+        int pid = atoi(ent->d_name);
+        if (pid <= 0) continue;
+        uint64_t rss_kib = cli_read_pid_rss_kib(pid);
+        if (rss_kib == 0) continue;
+        cli_process_sample sample;
+        sample.pid = pid;
+        sample.rss_kib = rss_kib;
+        cli_read_pid_name(pid, sample.name, sizeof(sample.name));
+        if (count < out_cap) {
+            out[count++] = sample;
+        } else {
+            int min_i = 0;
+            for (int i = 1; i < out_cap; i++) {
+                if (out[i].rss_kib < out[min_i].rss_kib) min_i = i;
+            }
+            if (sample.rss_kib > out[min_i].rss_kib) out[min_i] = sample;
+        }
+    }
+    closedir(dir);
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (out[j].rss_kib > out[i].rss_kib) {
+                cli_process_sample tmp = out[i];
+                out[i] = out[j];
+                out[j] = tmp;
+            }
+        }
+    }
+    return count;
+}
+
 static uint64_t cli_read_thread_vmstk_kib(int tid) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
@@ -696,6 +797,8 @@ static void cli_runtime_monitor_log_sample(
         uint64_t hwm_kib,
         double read_mibs,
         double write_mibs,
+        double mem_total_used_gib,
+        double mem_total_pct,
         double cuda_model_gib,
         double q8f16_gib,
         double q8f32_gib,
@@ -713,10 +816,12 @@ static void cli_runtime_monitor_log_sample(
         double mem_clock_mhz,
         double temp_c,
         const cli_thread_sample *threads,
-        int thread_count) {
+        int thread_count,
+        const cli_process_sample *procs,
+        int proc_count) {
     if (!m || !m->log_fp) return;
     fprintf(m->log_fp,
-            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
             elapsed_s,
             phase ? phase : "idle",
             current,
@@ -725,6 +830,8 @@ static void cli_runtime_monitor_log_sample(
             (double)hwm_kib / 1048576.0,
             read_mibs,
             write_mibs,
+            mem_total_used_gib,
+            mem_total_pct,
             cuda_model_gib,
             q8f16_gib,
             q8f32_gib,
@@ -750,6 +857,16 @@ static void cli_runtime_monitor_log_sample(
                     (double)threads[i].stack_rss_kib / 1048576.0);
         } else {
             fprintf(m->log_fp, ",0,,%.6f,%.6f", -1.0, -1.0);
+        }
+    }
+    for (int i = 0; i < CLI_TOP_THREAD_SLOTS; i++) {
+        if (procs && i < proc_count) {
+            fprintf(m->log_fp, ",%d,%s,%.6f",
+                    procs[i].pid,
+                    procs[i].name,
+                    (double)procs[i].rss_kib / 1048576.0);
+        } else {
+            fprintf(m->log_fp, ",0,,%.6f", -1.0);
         }
     }
     fputc('\n', m->log_fp);
@@ -781,6 +898,13 @@ static void *cli_runtime_monitor_main(void *arg) {
 
         const uint64_t rss_kib = cli_read_status_kib("VmRSS");
         const uint64_t hwm_kib = cli_read_status_kib("VmHWM");
+        uint64_t mem_total_kib = 0, mem_avail_kib = 0;
+        double mem_total_used_gib = -1.0, mem_total_pct = -1.0;
+        if (cli_read_system_memory_kib(&mem_total_kib, &mem_avail_kib) && mem_total_kib > 0) {
+            uint64_t used_kib = mem_total_kib > mem_avail_kib ? (mem_total_kib - mem_avail_kib) : 0;
+            mem_total_used_gib = (double)used_kib / 1048576.0;
+            mem_total_pct = 100.0 * (double)used_kib / (double)mem_total_kib;
+        }
         uint64_t read_b = 0, write_b = 0;
         double read_mibs = 0.0, write_mibs = 0.0;
         if (cli_read_proc_io(&read_b, &write_b)) {
@@ -817,6 +941,9 @@ static void *cli_runtime_monitor_main(void *arg) {
         memset(top_threads, 0, sizeof(top_threads));
         int top_thread_count = cli_collect_thread_samples(
             top_threads, CLI_MAX_THREAD_SAMPLES, prev_threads, &prev_thread_count, dt, clk_tck);
+        cli_process_sample top_procs[CLI_TOP_THREAD_SLOTS];
+        memset(top_procs, 0, sizeof(top_procs));
+        int top_proc_count = cli_collect_top_processes(top_procs, CLI_TOP_THREAD_SLOTS);
 
         const char *phase = "idle";
         int current = 0, total = 0;
@@ -891,6 +1018,8 @@ static void *cli_runtime_monitor_main(void *arg) {
             hwm_kib,
             read_mibs,
             write_mibs,
+            mem_total_used_gib,
+            mem_total_pct,
             cuda_model_gib,
             q8f16_gib,
             q8f32_gib,
@@ -908,15 +1037,19 @@ static void *cli_runtime_monitor_main(void *arg) {
             mem_clock_mhz,
             temp_c,
             top_threads,
-            top_thread_count);
+            top_thread_count,
+            top_procs,
+            top_proc_count);
 
         fprintf(stderr,
-                "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB cpu=%.1f%% sys_cpu=%.1f%% cpu_freq=%.0fMHz io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
+                "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB mem_total=%.2fGiB(%.1f%%) cpu=%.1f%% sys_cpu=%.1f%% cpu_freq=%.0fMHz io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
                 phase,
                 current,
                 total,
                 (double)rss_kib / 1048576.0,
                 (double)hwm_kib / 1048576.0,
+                mem_total_used_gib,
+                mem_total_pct,
                 proc_cpu_pct,
                 sys_cpu_pct,
                 cpu_freq_mhz,
@@ -961,7 +1094,7 @@ static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *
     if (m->log_path[0]) {
         m->log_fp = fopen(m->log_path, "wb");
         if (m->log_fp) {
-            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,proc_cpu_pct,sys_cpu_pct,cpu_freq_mhz,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w,gpu_sm_clock_mhz,gpu_mem_clock_mhz,gpu_temp_c,t1_tid,t1_name,t1_cpu_pct,t1_mem_gib,t2_tid,t2_name,t2_cpu_pct,t2_mem_gib,t3_tid,t3_name,t3_cpu_pct,t3_mem_gib,t4_tid,t4_name,t4_cpu_pct,t4_mem_gib,t5_tid,t5_name,t5_cpu_pct,t5_mem_gib\n", m->log_fp);
+            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,mem_total_used_gib,mem_total_pct,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,proc_cpu_pct,sys_cpu_pct,cpu_freq_mhz,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w,gpu_sm_clock_mhz,gpu_mem_clock_mhz,gpu_temp_c,t1_tid,t1_name,t1_cpu_pct,t1_mem_gib,t2_tid,t2_name,t2_cpu_pct,t2_mem_gib,t3_tid,t3_name,t3_cpu_pct,t3_mem_gib,t4_tid,t4_name,t4_cpu_pct,t4_mem_gib,t5_tid,t5_name,t5_cpu_pct,t5_mem_gib,p1_pid,p1_name,p1_mem_gib,p2_pid,p2_name,p2_mem_gib,p3_pid,p3_name,p3_mem_gib,p4_pid,p4_name,p4_mem_gib,p5_pid,p5_name,p5_mem_gib\n", m->log_fp);
             fflush(m->log_fp);
             fprintf(stderr, "ds4: runtime-monitor logging to %s\n", m->log_path);
         } else {

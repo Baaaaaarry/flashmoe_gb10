@@ -171,6 +171,22 @@ def collect_top_threads(rows, top_n=5):
     return [(tid, names.get(tid, f"tid-{tid}")) for tid, _ in ordered]
 
 
+def collect_top_processes(rows, top_n=5):
+    peaks = {}
+    names = {}
+    for row in rows:
+        for i in range(1, 6):
+            pid = row.get(f"p{i}_pid", 0)
+            name = row.get(f"p{i}_name", "") or f"pid-{pid}"
+            mem = row.get(f"p{i}_mem_gib", float("nan"))
+            if not pid or not finite(mem):
+                continue
+            peaks[pid] = max(peaks.get(pid, 0.0), mem)
+            names[pid] = name
+    ordered = sorted(peaks.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    return [(pid, names.get(pid, f"pid-{pid}")) for pid, _ in ordered]
+
+
 def build_thread_series(rows, tids, suffix):
     out = {tid: [] for tid, _ in tids}
     for row in rows:
@@ -184,6 +200,19 @@ def build_thread_series(rows, tids, suffix):
     return out
 
 
+def build_process_series(rows, pids):
+    out = {pid: [] for pid, _ in pids}
+    for row in rows:
+        rowmap = {}
+        for i in range(1, 6):
+            pid = row.get(f"p{i}_pid", 0)
+            if pid:
+                rowmap[pid] = row.get(f"p{i}_mem_gib", float("nan"))
+        for pid, _ in pids:
+            out[pid].append(rowmap.get(pid, float("nan")))
+    return out
+
+
 def render(rows, out_path: Path):
     xs = [row["time_s"] for row in rows]
     parts = [
@@ -193,9 +222,10 @@ def render(rows, out_path: Path):
     ]
     draw_phase_marks(parts, rows, xs)
     top_threads = [(tid, name) for tid, name in collect_top_threads(rows, top_n=5)]
+    top_procs = [(pid, name) for pid, name in collect_top_processes(rows, top_n=5)]
     thread_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
     thread_cpu = build_thread_series(rows, top_threads, "cpu_pct")
-    thread_mem = build_thread_series(rows, top_threads, "mem_gib")
+    proc_mem = build_process_series(rows, top_procs)
 
     # Panel 0: top thread CPU 0..100%
     x0, y0, w, h = panel_box(0)
@@ -217,31 +247,39 @@ def render(rows, out_path: Path):
         parts.append(f'<line x1="{lx:.1f}" y1="{ly:.1f}" x2="{lx + 18:.1f}" y2="{ly:.1f}" stroke="{color}" stroke-width="3"/>')
         parts.append(f'<text x="{lx + 24:.1f}" y="{ly + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(str(name))} ({tid})</text>')
 
-    # Panel 1: top thread memory proxy
+    # Panel 1: system + top process memory
     x0, y0, w, h = panel_box(1)
     mem_vals = []
-    for tid, _ in top_threads:
-        mem_vals.extend([v for v in thread_mem[tid] if finite(v)])
+    mem_vals.extend([r.get("mem_total_used_gib", float("nan")) for r in rows])
+    for pid, _ in top_procs:
+        mem_vals.extend([v for v in proc_mem[pid] if finite(v)])
     mem_ymax = max(mem_vals) if mem_vals else 1.0
     if mem_ymax <= 0.0:
         mem_ymax = 1.0
-    draw_axes(parts, x0, y0, w, h, "Top-5 CPU threads stack memory proxy (GiB)", 0.0, mem_ymax, max(xs) if xs else 1.0)
+    draw_axes(parts, x0, y0, w, h, "System memory and Top-5 process RSS (GiB)", 0.0, mem_ymax, max(xs) if xs else 1.0)
     legend_x = x0 + w - 280
     legend_y = y0 + 18
-    if top_threads:
-        parts.append(f'<rect x="{legend_x - 10:.1f}" y="{y0 + 4:.1f}" width="300" height="{24 + max(0, len(top_threads)-1) * 18:.1f}" fill="rgba(255,255,255,0.85)" stroke="#e5e7eb"/>')
-    for idx, (tid, name) in enumerate(top_threads):
+    legend_rows = 1 + len(top_procs)
+    parts.append(f'<rect x="{legend_x - 10:.1f}" y="{y0 + 4:.1f}" width="300" height="{24 + max(0, legend_rows-1) * 18:.1f}" fill="rgba(255,255,255,0.85)" stroke="#e5e7eb"/>')
+    sys_mem = [r.get("mem_total_used_gib", float("nan")) for r in rows]
+    scaled = scale_points(xs, sys_mem, x0, y0, w, h, 0.0, mem_ymax)
+    if scaled:
+        pts, _, _, _, _ = scaled
+        parts.append(f'<polyline fill="none" stroke="#111827" stroke-width="2.5" points="{pts}"/>')
+    parts.append(f'<line x1="{legend_x:.1f}" y1="{legend_y:.1f}" x2="{legend_x + 18:.1f}" y2="{legend_y:.1f}" stroke="#111827" stroke-width="3"/>')
+    parts.append(f'<text x="{legend_x + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">System memory used</text>')
+    for idx, (pid, name) in enumerate(top_procs):
         color = thread_colors[idx % len(thread_colors)]
-        ys = thread_mem[tid]
+        ys = proc_mem[pid]
         scaled = scale_points(xs, ys, x0, y0, w, h, 0.0, mem_ymax)
         if not scaled:
             continue
         pts, _, _, _, _ = scaled
         parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/>')
         lx = legend_x
-        ly = legend_y + idx * 18
+        ly = legend_y + (idx + 1) * 18
         parts.append(f'<line x1="{lx:.1f}" y1="{ly:.1f}" x2="{lx + 18:.1f}" y2="{ly:.1f}" stroke="{color}" stroke-width="3"/>')
-        parts.append(f'<text x="{lx + 24:.1f}" y="{ly + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(str(name))} ({tid})</text>')
+        parts.append(f'<text x="{lx + 24:.1f}" y="{ly + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(str(name))} ({pid})</text>')
 
     # Panel 2: GPU util + CUDA model cache (dual axis)
     x0, y0, w, h = panel_box(2)
