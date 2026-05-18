@@ -16690,30 +16690,43 @@ ds4_context_memory ds4_session_context_memory(ds4_session *s) {
     if (ds4_session_is_cpu(s)) {
         m.raw_cap = ds4_default_raw_cap((uint32_t)s->ctx_size);
         m.comp_cap = session_cpu_comp_cap(s);
-        m.raw_bytes = (uint64_t)DS4_N_LAYER *
-                      m.raw_cap *
-                      DS4_N_HEAD_DIM *
-                      sizeof(float);
         for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
             const ds4_layer_cache *layer = &s->cpu_cache.layer[il];
+            if (layer->raw_kv) {
+                m.raw_bytes += (uint64_t)layer->cap_raw *
+                               DS4_N_HEAD_DIM *
+                               sizeof(float);
+            }
             const uint32_t ratio = layer->compress_ratio;
             if (ratio == 0) continue;
-            const uint64_t attn_comp_bytes = (uint64_t)layer->comp_cap *
-                                             DS4_N_HEAD_DIM *
-                                             sizeof(float);
+            const uint64_t attn_comp_bytes = layer->attn_comp_kv
+                                                 ? (uint64_t)layer->comp_cap *
+                                                       DS4_N_HEAD_DIM *
+                                                       sizeof(float)
+                                                 : 0;
             m.compressed_bytes += attn_comp_bytes;
             if (ratio == 4) m.csa_kv_bytes += attn_comp_bytes;
             else m.hca_kv_bytes += attn_comp_bytes;
-            m.attn_state_bytes += layer_attn_state_bytes(ratio);
-            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            if (layer->attn_state_kv) {
+                m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            }
+            if (layer->attn_state_score) {
+                m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            }
             if (ratio == 4) {
-                const uint64_t index_comp_bytes = (uint64_t)layer->comp_cap *
-                                                  DS4_N_INDEXER_HEAD_DIM *
-                                                  sizeof(float);
+                const uint64_t index_comp_bytes = layer->index_comp_kv
+                                                      ? (uint64_t)layer->comp_cap *
+                                                            DS4_N_INDEXER_HEAD_DIM *
+                                                            sizeof(float)
+                                                      : 0;
                 m.compressed_bytes += index_comp_bytes;
                 m.csa_index_bytes += index_comp_bytes;
-                m.index_state_bytes += layer_index_state_bytes(ratio);
-                m.index_state_bytes += layer_index_state_bytes(ratio);
+                if (layer->index_state_kv) {
+                    m.index_state_bytes += layer_index_state_bytes(ratio);
+                }
+                if (layer->index_state_score) {
+                    m.index_state_bytes += layer_index_state_bytes(ratio);
+                }
                 if (m.comp_cap == 0) m.comp_cap = layer->comp_cap;
             }
         }
@@ -16726,30 +16739,36 @@ ds4_context_memory ds4_session_context_memory(ds4_session *s) {
         ds4_gpu_graph *g = &s->graph;
         m.raw_cap = g->raw_cap;
         m.comp_cap = g->comp_cap;
-        m.raw_bytes = (uint64_t)DS4_N_LAYER *
-                      g->raw_cap *
-                      DS4_N_HEAD_DIM *
-                      sizeof(float);
         for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+            if (g->layer_raw_cache[il]) {
+                m.raw_bytes += ds4_gpu_tensor_bytes(g->layer_raw_cache[il]);
+            }
             const uint32_t ratio = ds4_layer_compress_ratio(il);
             if (ratio == 0) continue;
-            const uint32_t layer_comp_cap = g->layer_comp_cap[il];
-            const uint64_t attn_comp_bytes = (uint64_t)layer_comp_cap *
-                                             DS4_N_HEAD_DIM *
-                                             sizeof(float);
+            const uint64_t attn_comp_bytes = g->layer_attn_comp_cache[il]
+                                                 ? ds4_gpu_tensor_bytes(g->layer_attn_comp_cache[il])
+                                                 : 0;
             m.compressed_bytes += attn_comp_bytes;
             if (ratio == 4) m.csa_kv_bytes += attn_comp_bytes;
             else m.hca_kv_bytes += attn_comp_bytes;
-            m.attn_state_bytes += layer_attn_state_bytes(ratio);
-            m.attn_state_bytes += layer_attn_state_bytes(ratio);
+            if (g->layer_attn_state_kv[il]) {
+                m.attn_state_bytes += ds4_gpu_tensor_bytes(g->layer_attn_state_kv[il]);
+            }
+            if (g->layer_attn_state_score[il]) {
+                m.attn_state_bytes += ds4_gpu_tensor_bytes(g->layer_attn_state_score[il]);
+            }
             if (ratio == 4) {
-                const uint64_t index_comp_bytes = (uint64_t)layer_comp_cap *
-                                                  DS4_N_INDEXER_HEAD_DIM *
-                                                  sizeof(float);
+                const uint64_t index_comp_bytes = g->layer_index_comp_cache[il]
+                                                      ? ds4_gpu_tensor_bytes(g->layer_index_comp_cache[il])
+                                                      : 0;
                 m.compressed_bytes += index_comp_bytes;
                 m.csa_index_bytes += index_comp_bytes;
-                m.index_state_bytes += layer_index_state_bytes(ratio);
-                m.index_state_bytes += layer_index_state_bytes(ratio);
+                if (g->layer_index_state_kv[il]) {
+                    m.index_state_bytes += ds4_gpu_tensor_bytes(g->layer_index_state_kv[il]);
+                }
+                if (g->layer_index_state_score[il]) {
+                    m.index_state_bytes += ds4_gpu_tensor_bytes(g->layer_index_state_score[il]);
+                }
             }
         }
         m.scratch_bytes = 2ull *
