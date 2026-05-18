@@ -5,16 +5,16 @@ import sys
 from pathlib import Path
 
 
-WIDTH = 1600
-HEIGHT = 1200
+WIDTH = 1800
+HEIGHT = 1400
 MARGIN_L = 70
 MARGIN_R = 20
 MARGIN_T = 40
 MARGIN_B = 40
 PANEL_GAP_X = 28
-PANEL_GAP_Y = 40
-PANEL_COLS = 2
-PANEL_ROWS = 2
+PANEL_GAP_Y = 50
+PANEL_COLS = 1
+PANEL_ROWS = 3
 
 
 def load_rows(path: Path):
@@ -148,6 +148,35 @@ def draw_phase_marks(parts, rows, xs):
         parts.append(f'<text x="{xx + 4:.1f}" y="{MARGIN_T - 10:.1f}" font-size="11" font-family="sans-serif" fill="#8a6d3b">{svg_escape(phase)}</text>')
 
 
+def collect_top_threads(rows, top_n=5):
+    peaks = {}
+    names = {}
+    for row in rows:
+        for i in range(1, 6):
+            tid = row.get(f"t{i}_tid", 0)
+            name = row.get(f"t{i}_name", "") or f"tid-{tid}"
+            cpu = row.get(f"t{i}_cpu_pct", float("nan"))
+            if not tid or not finite(cpu):
+                continue
+            peaks[tid] = max(peaks.get(tid, 0.0), cpu)
+            names[tid] = name
+    ordered = sorted(peaks.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+    return [(tid, names.get(tid, f"tid-{tid}")) for tid, _ in ordered]
+
+
+def build_thread_series(rows, tids, suffix):
+    out = {tid: [] for tid, _ in tids}
+    for row in rows:
+        rowmap = {}
+        for i in range(1, 6):
+            tid = row.get(f"t{i}_tid", 0)
+            if tid:
+                rowmap[tid] = row.get(f"t{i}_{suffix}", float("nan"))
+        for tid, _ in tids:
+            out[tid].append(rowmap.get(tid, 0.0 if suffix == "cpu_pct" else float("nan")))
+    return out
+
+
 def render(rows, out_path: Path):
     xs = [row["time_s"] for row in rows]
     parts = [
@@ -156,37 +185,79 @@ def render(rows, out_path: Path):
         '<text x="24" y="28" font-size="24" font-family="sans-serif" fill="#111">ds4 runtime monitor</text>',
     ]
     draw_phase_marks(parts, rows, xs)
-    draw_series(parts, xs, rows, [
-        ("rss_gib", "RSS", "#1f77b4"),
-        ("hwm_gib", "HWM", "#ff7f0e"),
-        ("cuda_model_gib", "CUDA model cache", "#2ca02c"),
-        ("gpu_mem_used_gib", "GPU mem used", "#d62728"),
-    ], 0, "Memory (GiB)")
-    draw_series(parts, xs, rows, [
-        ("io_read_mibs", "Read MiB/s", "#9467bd"),
-        ("io_write_mibs", "Write MiB/s", "#8c564b"),
-    ], 1, "Process I/O bandwidth")
-    draw_series(parts, xs, rows, [
-        ("gpu_util_pct", "GPU util %", "#e377c2"),
-        ("gpu_mem_util_pct", "GPU mem util %", "#7f7f7f"),
-        ("power_w", "Power W", "#bcbd22"),
-    ], 2, "GPU utilization / power")
+    top_threads = collect_top_threads(rows, top_n=5)
+    thread_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+    thread_cpu = build_thread_series(rows, top_threads, "cpu_pct")
+    thread_mem = build_thread_series(rows, top_threads, "mem_gib")
 
-    progress_rows = []
-    for row in rows:
-        cur = row.get("current", -1)
-        total = row.get("total", -1)
-        pct = float("nan")
-        if total and total > 0 and cur >= 0:
-            pct = 100.0 * float(cur) / float(total)
-        copied = dict(row)
-        copied["progress_pct"] = pct
-        progress_rows.append(copied)
-    draw_series(parts, xs, progress_rows, [
-        ("progress_pct", "Progress %", "#17becf"),
-        ("q8f16_gib", "Q8->F16 cache", "#ff9896"),
-        ("cuda_free_gib", "CUDA free", "#98df8a"),
-    ], 3, "Progress / cache / free memory")
+    # Panel 0: top thread CPU 0..100%
+    x0, y0, w, h = panel_box(0)
+    draw_axes(parts, x0, y0, w, h, "Top-5 CPU threads (% of one core)", 0.0, 100.0, max(xs) if xs else 1.0)
+    legend_x = x0 + 220
+    legend_y = y0 - 28
+    for idx, (tid, name) in enumerate(top_threads):
+        color = thread_colors[idx % len(thread_colors)]
+        ys = thread_cpu[tid]
+        scaled = scale_points(xs, ys, x0, y0, w, h, 0.0, 100.0)
+        if not scaled:
+            continue
+        pts, _, _, _, _ = scaled
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/>')
+        lx = legend_x + idx * 210
+        parts.append(f'<line x1="{lx:.1f}" y1="{legend_y:.1f}" x2="{lx + 18:.1f}" y2="{legend_y:.1f}" stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(name)} ({tid})</text>')
+
+    # Panel 1: top thread memory proxy
+    x0, y0, w, h = panel_box(1)
+    mem_vals = []
+    for tid, _ in top_threads:
+        mem_vals.extend([v for v in thread_mem[tid] if finite(v)])
+    mem_ymax = max(mem_vals) if mem_vals else 1.0
+    if mem_ymax <= 0.0:
+        mem_ymax = 1.0
+    draw_axes(parts, x0, y0, w, h, "Top-5 CPU threads memory proxy (stack RSS GiB)", 0.0, mem_ymax, max(xs) if xs else 1.0)
+    legend_x = x0 + 220
+    legend_y = y0 - 28
+    for idx, (tid, name) in enumerate(top_threads):
+        color = thread_colors[idx % len(thread_colors)]
+        ys = thread_mem[tid]
+        scaled = scale_points(xs, ys, x0, y0, w, h, 0.0, mem_ymax)
+        if not scaled:
+            continue
+        pts, _, _, _, _ = scaled
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/>')
+        lx = legend_x + idx * 210
+        parts.append(f'<line x1="{lx:.1f}" y1="{legend_y:.1f}" x2="{lx + 18:.1f}" y2="{legend_y:.1f}" stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(name)} ({tid})</text>')
+
+    # Panel 2: GPU util + CUDA model cache (dual axis)
+    x0, y0, w, h = panel_box(2)
+    gpu_vals = [r.get("gpu_util_pct", float("nan")) for r in rows]
+    cache_vals = [r.get("cuda_model_gib", float("nan")) for r in rows]
+    draw_axes(parts, x0, y0, w, h, "GPU util % and CUDA model cache GiB", 0.0, 100.0, max(xs) if xs else 1.0)
+    good_cache = [v for v in cache_vals if finite(v)]
+    cache_max = max(good_cache) if good_cache else 1.0
+    if cache_max <= 0.0:
+        cache_max = 1.0
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        yy = y0 + h - frac * h
+        val = frac * cache_max
+        parts.append(f'<text x="{x0 + w + 8:.1f}" y="{yy + 4:.1f}" font-size="11" font-family="sans-serif" fill="#555">{val:.1f}</text>')
+    parts.append(f'<text x="{x0 + w + 8:.1f}" y="{y0 - 12:.1f}" font-size="14" font-family="sans-serif" fill="#555">GiB</text>')
+    scaled = scale_points(xs, gpu_vals, x0, y0, w, h, 0.0, 100.0)
+    if scaled:
+        pts, _, _, _, _ = scaled
+        parts.append(f'<polyline fill="none" stroke="#e377c2" stroke-width="2.5" points="{pts}"/>')
+    scaled = scale_points(xs, cache_vals, x0, y0, w, h, 0.0, cache_max)
+    if scaled:
+        pts, _, _, _, _ = scaled
+        parts.append(f'<polyline fill="none" stroke="#2ca02c" stroke-width="2.5" points="{pts}"/>')
+    legend_x = x0 + 220
+    legend_y = y0 - 28
+    parts.append(f'<line x1="{legend_x:.1f}" y1="{legend_y:.1f}" x2="{legend_x + 18:.1f}" y2="{legend_y:.1f}" stroke="#e377c2" stroke-width="3"/>')
+    parts.append(f'<text x="{legend_x + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">GPU util %</text>')
+    parts.append(f'<line x1="{legend_x + 180:.1f}" y1="{legend_y:.1f}" x2="{legend_x + 198:.1f}" y2="{legend_y:.1f}" stroke="#2ca02c" stroke-width="3"/>')
+    parts.append(f'<text x="{legend_x + 204:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">CUDA model cache GiB</text>')
     parts.append("</svg>")
     out_path.write_text("\n".join(parts), encoding="utf-8")
 

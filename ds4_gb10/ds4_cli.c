@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#include <dirent.h>
 
 typedef struct {
     const char *prompt;
@@ -87,6 +88,17 @@ typedef struct {
     int cpu_count;
     bool have_cpu;
 } cli_cpu_sample;
+
+typedef struct {
+    int tid;
+    char name[64];
+    uint64_t total_ticks;
+    double cpu_pct;
+    uint64_t stack_rss_kib;
+} cli_thread_sample;
+
+#define CLI_MAX_THREAD_SAMPLES 256
+#define CLI_TOP_THREAD_SLOTS 5
 
 static double cli_now_sec(void);
 
@@ -446,6 +458,211 @@ static bool cli_query_nvidia_smi(
     return ok;
 }
 
+static bool cli_query_nvidia_smi_dmon(
+        int *gpu_util,
+        int *mem_util,
+        double *sm_clock_mhz,
+        double *mem_clock_mhz,
+        double *power_w,
+        double *temp_c) {
+    FILE *fp = popen(
+        "nvidia-smi dmon -s pucvmet -c 1 2>/dev/null",
+        "r");
+    if (!fp) return false;
+    char line[512];
+    bool ok = false;
+    while (fgets(line, sizeof(line), fp)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char gpu[32];
+        double pwr = -1.0, gtemp = -1.0, sm = -1.0, mem = -1.0;
+        double enc = -1.0, dec = -1.0, mclk = -1.0, pclk = -1.0;
+        if (sscanf(line, " %31s %lf %lf %lf %lf %lf %lf %lf %lf",
+                   gpu, &pwr, &gtemp, &sm, &mem, &enc, &dec, &mclk, &pclk) >= 5) {
+            if (gpu_util) *gpu_util = sm >= 0.0 ? (int)llround(sm) : -1;
+            if (mem_util) *mem_util = mem >= 0.0 ? (int)llround(mem) : -1;
+            if (sm_clock_mhz) *sm_clock_mhz = pclk;
+            if (mem_clock_mhz) *mem_clock_mhz = mclk;
+            if (power_w) *power_w = pwr;
+            if (temp_c) *temp_c = gtemp;
+            ok = true;
+            break;
+        }
+    }
+    (void)pclose(fp);
+    return ok;
+}
+
+static bool cli_read_thread_stat(int tid, uint64_t *ticks_out) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/stat", tid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    char line[1024];
+    bool ok = false;
+    if (fgets(line, sizeof(line), fp)) {
+        char *rparen = strrchr(line, ')');
+        if (rparen && rparen[1] == ' ') {
+            char state = '\0';
+            unsigned long long utime = 0, stime = 0;
+            if (sscanf(rparen + 2,
+                       "%c %*d %*d %*d %*d %*d %*u %*lu %*lu %*lu %*lu %llu %llu",
+                       &state, &utime, &stime) == 3) {
+                if (ticks_out) *ticks_out = (uint64_t)(utime + stime);
+                ok = true;
+            }
+        }
+    }
+    fclose(fp);
+    return ok;
+}
+
+static void cli_read_thread_name(int tid, char *buf, size_t cap) {
+    if (!buf || cap == 0) return;
+    buf[0] = '\0';
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/comm", tid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        snprintf(buf, cap, "tid-%d", tid);
+        return;
+    }
+    if (!fgets(buf, (int)cap, fp)) {
+        snprintf(buf, cap, "tid-%d", tid);
+        fclose(fp);
+        return;
+    }
+    fclose(fp);
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+        buf[--n] = '\0';
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] == ',') buf[i] = '_';
+    }
+}
+
+static uint64_t cli_read_thread_stack_rss_kib(int tid) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/smaps", tid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    char line[512];
+    bool in_stack = false;
+    uint64_t rss_kib = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strchr(line, '-') && strchr(line, ':') == NULL) {
+            in_stack = strstr(line, "[stack") != NULL;
+            continue;
+        }
+        if (in_stack) {
+            unsigned long long kib = 0;
+            if (sscanf(line, "Rss: %llu kB", &kib) == 1) {
+                rss_kib += (uint64_t)kib;
+            }
+        }
+    }
+    fclose(fp);
+    return rss_kib;
+}
+
+static int cli_find_prev_thread_sample(
+        const cli_thread_sample *prev,
+        int prev_count,
+        int tid) {
+    for (int i = 0; i < prev_count; i++) {
+        if (prev[i].tid == tid) return i;
+    }
+    return -1;
+}
+
+static int cli_collect_thread_samples(
+        cli_thread_sample *out,
+        int out_cap,
+        cli_thread_sample *prev,
+        int *prev_count,
+        double dt,
+        long clk_tck) {
+    if (!out || out_cap <= 0 || !prev || !prev_count || dt <= 1.0e-6 || clk_tck <= 0) return 0;
+    DIR *dir = opendir("/proc/self/task");
+    if (!dir) return 0;
+    struct dirent *ent;
+    int count = 0;
+    cli_thread_sample current[CLI_MAX_THREAD_SAMPLES];
+    int current_count = 0;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+        int tid = atoi(ent->d_name);
+        if (tid <= 0) continue;
+        uint64_t ticks = 0;
+        if (!cli_read_thread_stat(tid, &ticks)) continue;
+        if (current_count < CLI_MAX_THREAD_SAMPLES) {
+            current[current_count].tid = tid;
+            current[current_count].total_ticks = ticks;
+            cli_read_thread_name(tid, current[current_count].name, sizeof(current[current_count].name));
+            current[current_count].cpu_pct = 0.0;
+            current[current_count].stack_rss_kib = 0;
+            current_count++;
+        }
+        int idx = cli_find_prev_thread_sample(prev, *prev_count, tid);
+        if (idx < 0) continue;
+        double cpu_pct = 100.0 * ((double)(ticks - prev[idx].total_ticks) / (double)clk_tck) / dt;
+        if (cpu_pct < 0.0) cpu_pct = 0.0;
+        if (cpu_pct > 100.0) cpu_pct = 100.0;
+        if (count < out_cap) {
+            out[count].tid = tid;
+            out[count].total_ticks = ticks;
+            out[count].cpu_pct = cpu_pct;
+            out[count].stack_rss_kib = 0;
+            cli_read_thread_name(tid, out[count].name, sizeof(out[count].name));
+            count++;
+        }
+    }
+    closedir(dir);
+
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (out[j].cpu_pct > out[i].cpu_pct) {
+                cli_thread_sample tmp = out[i];
+                out[i] = out[j];
+                out[j] = tmp;
+            }
+        }
+    }
+    if (count > CLI_TOP_THREAD_SLOTS) count = CLI_TOP_THREAD_SLOTS;
+    for (int i = 0; i < count; i++) {
+        out[i].stack_rss_kib = cli_read_thread_stack_rss_kib(out[i].tid);
+    }
+
+    if (current_count > CLI_MAX_THREAD_SAMPLES) current_count = CLI_MAX_THREAD_SAMPLES;
+    memcpy(prev, current, (size_t)current_count * sizeof(cli_thread_sample));
+    *prev_count = current_count;
+    return count;
+}
+
+static void cli_seed_thread_samples(
+        cli_thread_sample *prev,
+        int *prev_count) {
+    if (!prev || !prev_count) return;
+    *prev_count = 0;
+    DIR *dir = opendir("/proc/self/task");
+    if (!dir) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+        int tid = atoi(ent->d_name);
+        if (tid <= 0 || *prev_count >= CLI_MAX_THREAD_SAMPLES) continue;
+        uint64_t ticks = 0;
+        if (!cli_read_thread_stat(tid, &ticks)) continue;
+        prev[*prev_count].tid = tid;
+        prev[*prev_count].total_ticks = ticks;
+        prev[*prev_count].cpu_pct = 0.0;
+        prev[*prev_count].stack_rss_kib = 0;
+        cli_read_thread_name(tid, prev[*prev_count].name, sizeof(prev[*prev_count].name));
+        (*prev_count)++;
+    }
+    closedir(dir);
+}
+
 static void cli_runtime_monitor_set_phase(cli_runtime_monitor *m, const char *phase) {
     if (!m || !m->enabled) return;
     pthread_mutex_lock(&m->mu);
@@ -486,10 +703,12 @@ static void cli_runtime_monitor_log_sample(
         double power_w,
         double sm_clock_mhz,
         double mem_clock_mhz,
-        double temp_c) {
+        double temp_c,
+        const cli_thread_sample *threads,
+        int thread_count) {
     if (!m || !m->log_fp) return;
     fprintf(m->log_fp,
-            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
             elapsed_s,
             phase ? phase : "idle",
             current,
@@ -514,6 +733,18 @@ static void cli_runtime_monitor_log_sample(
             sm_clock_mhz,
             mem_clock_mhz,
             temp_c);
+    for (int i = 0; i < CLI_TOP_THREAD_SLOTS; i++) {
+        if (threads && i < thread_count) {
+            fprintf(m->log_fp, ",%d,%s,%.6f,%.6f",
+                    threads[i].tid,
+                    threads[i].name,
+                    threads[i].cpu_pct,
+                    (double)threads[i].stack_rss_kib / 1048576.0);
+        } else {
+            fprintf(m->log_fp, ",0,,%.6f,%.6f", -1.0, -1.0);
+        }
+    }
+    fputc('\n', m->log_fp);
     fflush(m->log_fp);
 }
 
@@ -528,6 +759,11 @@ static void *cli_runtime_monitor_main(void *arg) {
     cpu_prev.proc_cpu_sec = cli_read_proc_cpu_time_sec();
     cpu_prev.have_cpu = cli_read_proc_stat(&cpu_prev.total_ticks, &cpu_prev.idle_ticks) &&
                         cpu_prev.proc_cpu_sec >= 0.0;
+    const long clk_tck = sysconf(_SC_CLK_TCK);
+        cli_thread_sample prev_threads[CLI_MAX_THREAD_SAMPLES];
+        int prev_thread_count = 0;
+        memset(prev_threads, 0, sizeof(prev_threads));
+        cli_seed_thread_samples(prev_threads, &prev_thread_count);
     while (!m->stop) {
         const useconds_t sleep_us = (useconds_t)(m->interval_s > 0.01f ? m->interval_s * 1000000.0f : 1000000.0f);
         usleep(sleep_us);
@@ -569,6 +805,10 @@ static void *cli_runtime_monitor_main(void *arg) {
             }
         }
         cpu_prev = cpu_now;
+        cli_thread_sample top_threads[CLI_TOP_THREAD_SLOTS];
+        memset(top_threads, 0, sizeof(top_threads));
+        int top_thread_count = cli_collect_thread_samples(
+            top_threads, CLI_MAX_THREAD_SAMPLES, prev_threads, &prev_thread_count, dt, clk_tck);
 
         const char *phase = "idle";
         int current = 0, total = 0;
@@ -620,6 +860,16 @@ static void *cli_runtime_monitor_main(void *arg) {
                          sm_clock_mhz,
                          mem_clock_mhz,
                          temp_c);
+            } else if (cli_query_nvidia_smi_dmon(&gpu_util, &mem_util, &sm_clock_mhz, &mem_clock_mhz, &power_w, &temp_c)) {
+                snprintf(smi_buf,
+                         sizeof(smi_buf),
+                         " gpu_util=%d%% gpu_mem_util=%d%% power=%.1fW sm_clk=%.0fMHz mem_clk=%.0fMHz temp=%.0fC",
+                         gpu_util,
+                         mem_util,
+                         power_w,
+                         sm_clock_mhz,
+                         mem_clock_mhz,
+                         temp_c);
             }
         }
 
@@ -648,7 +898,9 @@ static void *cli_runtime_monitor_main(void *arg) {
             power_w,
             sm_clock_mhz,
             mem_clock_mhz,
-            temp_c);
+            temp_c,
+            top_threads,
+            top_thread_count);
 
         fprintf(stderr,
                 "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB cpu=%.1f%% sys_cpu=%.1f%% cpu_freq=%.0fMHz io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
@@ -701,7 +953,7 @@ static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *
     if (m->log_path[0]) {
         m->log_fp = fopen(m->log_path, "wb");
         if (m->log_fp) {
-            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,proc_cpu_pct,sys_cpu_pct,cpu_freq_mhz,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w,gpu_sm_clock_mhz,gpu_mem_clock_mhz,gpu_temp_c\n", m->log_fp);
+            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,proc_cpu_pct,sys_cpu_pct,cpu_freq_mhz,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w,gpu_sm_clock_mhz,gpu_mem_clock_mhz,gpu_temp_c,t1_tid,t1_name,t1_cpu_pct,t1_mem_gib,t2_tid,t2_name,t2_cpu_pct,t2_mem_gib,t3_tid,t3_name,t3_cpu_pct,t3_mem_gib,t4_tid,t4_name,t4_cpu_pct,t4_mem_gib,t5_tid,t5_name,t5_cpu_pct,t5_mem_gib\n", m->log_fp);
             fflush(m->log_fp);
             fprintf(stderr, "ds4: runtime-monitor logging to %s\n", m->log_path);
         } else {

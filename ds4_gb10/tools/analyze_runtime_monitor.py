@@ -94,6 +94,27 @@ def main(argv):
     print(f"runtime monitor summary: {path}")
     print(f"total samples: {len(rows)}")
     print("")
+    # Top CPU threads by peak slot sample.
+    thread_peaks = {}
+    thread_names = {}
+    thread_mem_peaks = {}
+    for row in rows:
+        for i in range(1, 6):
+            tid = row.get(f"t{i}_tid", 0)
+            if not tid:
+                continue
+            cpu = row.get(f"t{i}_cpu_pct", float("nan"))
+            mem = row.get(f"t{i}_mem_gib", float("nan"))
+            thread_names[tid] = row.get(f"t{i}_name", "") or f"tid-{tid}"
+            if finite(cpu):
+                thread_peaks[tid] = max(thread_peaks.get(tid, 0.0), cpu)
+            if finite(mem):
+                thread_mem_peaks[tid] = max(thread_mem_peaks.get(tid, 0.0), mem)
+    if thread_peaks:
+        print("[top CPU threads]")
+        for tid, cpu in sorted(thread_peaks.items(), key=lambda kv: kv[1], reverse=True)[:5]:
+            print(f"  {thread_names.get(tid, f'tid-{tid}')} ({tid}): cpu_peak={fmt(cpu, '%')} mem_peak={fmt(thread_mem_peaks.get(tid, float('nan')), 'GiB')}")
+        print("")
     for phase in phases:
         summary = summarize_phase(rows, phase)
         if not summary:
@@ -106,6 +127,7 @@ def main(argv):
         print(f"  gpu_clocks: sm_avg={fmt(summary['avg_sm_clock_mhz'], 'MHz')} mem_avg={fmt(summary['avg_mem_clock_mhz'], 'MHz')} power_avg={fmt(summary['avg_power_w'], 'W')} power_peak={fmt(summary['peak_power_w'], 'W')}")
         print(f"  memory: rss_avg={fmt(summary['avg_rss_gib'], 'GiB')} rss_peak={fmt(summary['peak_rss_gib'], 'GiB')} gpu_mem_avg={fmt(summary['avg_gpu_mem_used_gib'], 'GiB')} gpu_mem_peak={fmt(summary['peak_gpu_mem_used_gib'], 'GiB')} cuda_model_peak={fmt(summary['peak_cuda_model_gib'], 'GiB')}")
         print(f"  bandwidth: read_avg={fmt(summary['avg_read_mibs'], 'MiB/s')} read_peak={fmt(summary['peak_read_mibs'], 'MiB/s')} write_avg={fmt(summary['avg_write_mibs'], 'MiB/s')} write_peak={fmt(summary['peak_write_mibs'], 'MiB/s')}")
+        print(f"  cache+gpu: cuda_model_peak={fmt(summary['peak_cuda_model_gib'], 'GiB')} sm_clock_avg={fmt(summary['avg_sm_clock_mhz'], 'MHz')}")
         print("")
 
 
