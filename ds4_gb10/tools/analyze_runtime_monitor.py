@@ -93,7 +93,7 @@ def main(argv):
         raise SystemExit(f"usage: {argv[0]} MONITOR.csv")
     path = Path(argv[1])
     rows = load_rows(path)
-    phase_order = ["startup", "inspect", "prefill", "decode", "generation", "flashmoe-export", "kv-cache-report", "imatrix", "repl"]
+    phase_order = ["startup-load", "inspect", "prefill", "decode", "generation", "flashmoe-export", "kv-cache-report", "imatrix", "repl"]
     phases = []
     for row in rows:
         p = row.get("phase", "idle")
@@ -122,7 +122,9 @@ def main(argv):
     if thread_peaks:
         print("[top CPU threads]")
         for tid, cpu in sorted(thread_peaks.items(), key=lambda kv: kv[1], reverse=True)[:5]:
-            print(f"  {thread_names.get(tid, f'tid-{tid}')} ({tid}): cpu_peak={fmt(cpu, '%')} mem_peak={fmt(thread_mem_peaks.get(tid, float('nan')), 'GiB')}")
+            if cpu <= 0.01:
+                continue
+            print(f"  {thread_names.get(tid, f'tid-{tid}')} ({tid}): cpu_peak={fmt(cpu, '%')} stack_peak={fmt(thread_mem_peaks.get(tid, float('nan')), 'GiB')}")
         print("")
     for phase in phases:
         summary = summarize_phase(rows, phase)

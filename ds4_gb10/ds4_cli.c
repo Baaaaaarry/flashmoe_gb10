@@ -555,28 +555,22 @@ static void cli_read_thread_name(int tid, char *buf, size_t cap) {
     }
 }
 
-static uint64_t cli_read_thread_stack_rss_kib(int tid) {
+static uint64_t cli_read_thread_vmstk_kib(int tid) {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "/proc/self/task/%d/smaps", tid);
+    snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
     FILE *fp = fopen(path, "rb");
     if (!fp) return 0;
-    char line[512];
-    bool in_stack = false;
-    uint64_t rss_kib = 0;
+    char line[256];
+    uint64_t value = 0;
     while (fgets(line, sizeof(line), fp)) {
-        if (strchr(line, '-') && strchr(line, ':') == NULL) {
-            in_stack = strstr(line, "[stack") != NULL;
-            continue;
-        }
-        if (in_stack) {
-            unsigned long long kib = 0;
-            if (sscanf(line, "Rss: %llu kB", &kib) == 1) {
-                rss_kib += (uint64_t)kib;
-            }
+        unsigned long long kib = 0;
+        if (sscanf(line, "VmStk: %llu kB", &kib) == 1) {
+            value = (uint64_t)kib;
+            break;
         }
     }
     fclose(fp);
-    return rss_kib;
+    return value;
 }
 
 static int cli_find_prev_thread_sample(
@@ -644,7 +638,7 @@ static int cli_collect_thread_samples(
     }
     if (count > CLI_TOP_THREAD_SLOTS) count = CLI_TOP_THREAD_SLOTS;
     for (int i = 0; i < count; i++) {
-        out[i].stack_rss_kib = cli_read_thread_stack_rss_kib(out[i].tid);
+        out[i].stack_rss_kib = cli_read_thread_vmstk_kib(out[i].tid);
     }
 
     if (current_count > CLI_MAX_THREAD_SAMPLES) current_count = CLI_MAX_THREAD_SAMPLES;
@@ -952,7 +946,7 @@ static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *
     m->enabled = true;
     m->interval_s = cfg->runtime_monitor_interval > 0.0f ? cfg->runtime_monitor_interval : 1.0f;
     m->backend = cfg->engine.backend;
-    m->phase = "startup";
+    m->phase = "startup-load";
     m->start_ts = cli_now_sec();
     const char *log_path = cfg->runtime_monitor_log_path;
     if (log_path && log_path[0]) {

@@ -192,7 +192,7 @@ def render(rows, out_path: Path):
         '<text x="24" y="28" font-size="24" font-family="sans-serif" fill="#111">ds4 runtime monitor</text>',
     ]
     draw_phase_marks(parts, rows, xs)
-    top_threads = collect_top_threads(rows, top_n=5)
+    top_threads = [(tid, name) for tid, name in collect_top_threads(rows, top_n=5)]
     thread_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
     thread_cpu = build_thread_series(rows, top_threads, "cpu_pct")
     thread_mem = build_thread_series(rows, top_threads, "mem_gib")
@@ -200,8 +200,10 @@ def render(rows, out_path: Path):
     # Panel 0: top thread CPU 0..100%
     x0, y0, w, h = panel_box(0)
     draw_axes(parts, x0, y0, w, h, "Top-5 CPU threads (% of one core)", 0.0, 100.0, max(xs) if xs else 1.0)
-    legend_x = x0 + 220
-    legend_y = y0 - 28
+    legend_x = x0 + w - 280
+    legend_y = y0 + 18
+    if top_threads:
+        parts.append(f'<rect x="{legend_x - 10:.1f}" y="{y0 + 4:.1f}" width="300" height="{24 + max(0, len(top_threads)-1) * 18:.1f}" fill="rgba(255,255,255,0.85)" stroke="#e5e7eb"/>')
     for idx, (tid, name) in enumerate(top_threads):
         color = thread_colors[idx % len(thread_colors)]
         ys = thread_cpu[tid]
@@ -210,9 +212,10 @@ def render(rows, out_path: Path):
             continue
         pts, _, _, _, _ = scaled
         parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/>')
-        lx = legend_x + idx * 210
-        parts.append(f'<line x1="{lx:.1f}" y1="{legend_y:.1f}" x2="{lx + 18:.1f}" y2="{legend_y:.1f}" stroke="{color}" stroke-width="3"/>')
-        parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(name)} ({tid})</text>')
+        lx = legend_x
+        ly = legend_y + idx * 18
+        parts.append(f'<line x1="{lx:.1f}" y1="{ly:.1f}" x2="{lx + 18:.1f}" y2="{ly:.1f}" stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{lx + 24:.1f}" y="{ly + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(str(name))} ({tid})</text>')
 
     # Panel 1: top thread memory proxy
     x0, y0, w, h = panel_box(1)
@@ -222,9 +225,11 @@ def render(rows, out_path: Path):
     mem_ymax = max(mem_vals) if mem_vals else 1.0
     if mem_ymax <= 0.0:
         mem_ymax = 1.0
-    draw_axes(parts, x0, y0, w, h, "Top-5 CPU threads memory proxy (stack RSS GiB)", 0.0, mem_ymax, max(xs) if xs else 1.0)
-    legend_x = x0 + 220
-    legend_y = y0 - 28
+    draw_axes(parts, x0, y0, w, h, "Top-5 CPU threads stack memory proxy (GiB)", 0.0, mem_ymax, max(xs) if xs else 1.0)
+    legend_x = x0 + w - 280
+    legend_y = y0 + 18
+    if top_threads:
+        parts.append(f'<rect x="{legend_x - 10:.1f}" y="{y0 + 4:.1f}" width="300" height="{24 + max(0, len(top_threads)-1) * 18:.1f}" fill="rgba(255,255,255,0.85)" stroke="#e5e7eb"/>')
     for idx, (tid, name) in enumerate(top_threads):
         color = thread_colors[idx % len(thread_colors)]
         ys = thread_mem[tid]
@@ -233,9 +238,10 @@ def render(rows, out_path: Path):
             continue
         pts, _, _, _, _ = scaled
         parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/>')
-        lx = legend_x + idx * 210
-        parts.append(f'<line x1="{lx:.1f}" y1="{legend_y:.1f}" x2="{lx + 18:.1f}" y2="{legend_y:.1f}" stroke="{color}" stroke-width="3"/>')
-        parts.append(f'<text x="{lx + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(name)} ({tid})</text>')
+        lx = legend_x
+        ly = legend_y + idx * 18
+        parts.append(f'<line x1="{lx:.1f}" y1="{ly:.1f}" x2="{lx + 18:.1f}" y2="{ly:.1f}" stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{lx + 24:.1f}" y="{ly + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">{svg_escape(str(name))} ({tid})</text>')
 
     # Panel 2: GPU util + CUDA model cache (dual axis)
     x0, y0, w, h = panel_box(2)
@@ -259,12 +265,13 @@ def render(rows, out_path: Path):
     if scaled:
         pts, _, _, _, _ = scaled
         parts.append(f'<polyline fill="none" stroke="#2ca02c" stroke-width="2.5" points="{pts}"/>')
-    legend_x = x0 + 220
-    legend_y = y0 - 28
+    legend_x = x0 + w - 280
+    legend_y = y0 + 18
+    parts.append(f'<rect x="{legend_x - 10:.1f}" y="{y0 + 4:.1f}" width="300" height="42" fill="rgba(255,255,255,0.85)" stroke="#e5e7eb"/>')
     parts.append(f'<line x1="{legend_x:.1f}" y1="{legend_y:.1f}" x2="{legend_x + 18:.1f}" y2="{legend_y:.1f}" stroke="#e377c2" stroke-width="3"/>')
     parts.append(f'<text x="{legend_x + 24:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">GPU util %</text>')
-    parts.append(f'<line x1="{legend_x + 180:.1f}" y1="{legend_y:.1f}" x2="{legend_x + 198:.1f}" y2="{legend_y:.1f}" stroke="#2ca02c" stroke-width="3"/>')
-    parts.append(f'<text x="{legend_x + 204:.1f}" y="{legend_y + 4:.1f}" font-size="12" font-family="sans-serif" fill="#333">CUDA model cache GiB</text>')
+    parts.append(f'<line x1="{legend_x:.1f}" y1="{legend_y + 18:.1f}" x2="{legend_x + 18:.1f}" y2="{legend_y + 18:.1f}" stroke="#2ca02c" stroke-width="3"/>')
+    parts.append(f'<text x="{legend_x + 24:.1f}" y="{legend_y + 22:.1f}" font-size="12" font-family="sans-serif" fill="#333">CUDA model cache GiB</text>')
     parts.append("</svg>")
     out_path.write_text("\n".join(parts), encoding="utf-8")
 
