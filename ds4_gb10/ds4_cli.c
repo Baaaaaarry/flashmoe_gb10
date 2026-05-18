@@ -80,6 +80,14 @@ typedef struct {
     char log_path[PATH_MAX];
 } cli_runtime_monitor;
 
+typedef struct {
+    uint64_t total_ticks;
+    uint64_t idle_ticks;
+    double proc_cpu_sec;
+    int cpu_count;
+    bool have_cpu;
+} cli_cpu_sample;
+
 static double cli_now_sec(void);
 
 static cli_runtime_monitor *g_cli_runtime_monitor;
@@ -331,23 +339,101 @@ static bool cli_read_proc_io(uint64_t *read_bytes, uint64_t *write_bytes) {
     return true;
 }
 
+static bool cli_read_proc_stat(uint64_t *total_ticks, uint64_t *idle_ticks) {
+    FILE *fp = fopen("/proc/stat", "rb");
+    if (!fp) return false;
+    char line[512];
+    bool ok = false;
+    if (fgets(line, sizeof(line), fp)) {
+        unsigned long long user = 0, nice = 0, system = 0, idle = 0;
+        unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
+        if (sscanf(line,
+                   "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) >= 4) {
+            if (total_ticks) {
+                *total_ticks = (uint64_t)(user + nice + system + idle + iowait + irq + softirq + steal);
+            }
+            if (idle_ticks) {
+                *idle_ticks = (uint64_t)(idle + iowait);
+            }
+            ok = true;
+        }
+    }
+    fclose(fp);
+    return ok;
+}
+
+static double cli_read_proc_cpu_time_sec(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) return -1.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+}
+
+static double cli_read_avg_cpu_freq_mhz(void) {
+    double sum_mhz = 0.0;
+    int n = 0;
+    for (int cpu = 0; cpu < 4096; cpu++) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+        FILE *fp = fopen(path, "rb");
+        if (!fp) continue;
+        unsigned long long khz = 0;
+        if (fscanf(fp, "%llu", &khz) == 1 && khz > 0) {
+            sum_mhz += (double)khz / 1000.0;
+            n++;
+        }
+        fclose(fp);
+    }
+    if (n > 0) return sum_mhz / (double)n;
+
+    FILE *fp = fopen("/proc/cpuinfo", "rb");
+    if (!fp) return -1.0;
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        double mhz = 0.0;
+        if (sscanf(line, "cpu MHz\t: %lf", &mhz) == 1 && mhz > 0.0) {
+            sum_mhz += mhz;
+            n++;
+        }
+    }
+    fclose(fp);
+    return n > 0 ? sum_mhz / (double)n : -1.0;
+}
+
 static bool cli_query_nvidia_smi(
         int *gpu_util,
         int *mem_util,
         double *mem_used_mb,
         double *mem_total_mb,
-        double *power_w) {
+        double *power_w,
+        double *sm_clock_mhz,
+        double *mem_clock_mhz,
+        double *temp_c) {
     FILE *fp = popen(
-        "nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,power.draw --format=csv,noheader,nounits 2>/dev/null",
+        "nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,clocks.current.sm,clocks.current.memory,temperature.gpu --format=csv,noheader,nounits 2>/dev/null",
         "r");
     if (!fp) return false;
     char line[256];
     bool ok = false;
     if (fgets(line, sizeof(line), fp)) {
         int gu = -1, mu = -1;
-        double used = 0.0, total = 0.0, power = 0.0;
-        if (sscanf(line, " %d , %d , %lf , %lf , %lf", &gu, &mu, &used, &total, &power) == 5 ||
-            sscanf(line, " %d, %d, %lf, %lf, %lf", &gu, &mu, &used, &total, &power) == 5) {
+        double used = 0.0, total = 0.0, power = 0.0, sm = -1.0, mem = -1.0, temp = -1.0;
+        if (sscanf(line, " %d , %d , %lf , %lf , %lf , %lf , %lf , %lf",
+                   &gu, &mu, &used, &total, &power, &sm, &mem, &temp) == 8 ||
+            sscanf(line, " %d, %d, %lf, %lf, %lf, %lf, %lf, %lf",
+                   &gu, &mu, &used, &total, &power, &sm, &mem, &temp) == 8) {
+            if (gpu_util) *gpu_util = gu;
+            if (mem_util) *mem_util = mu;
+            if (mem_used_mb) *mem_used_mb = used;
+            if (mem_total_mb) *mem_total_mb = total;
+            if (power_w) *power_w = power;
+            if (sm_clock_mhz) *sm_clock_mhz = sm;
+            if (mem_clock_mhz) *mem_clock_mhz = mem;
+            if (temp_c) *temp_c = temp;
+            ok = true;
+        } else if (sscanf(line, " %d , %d , %lf , %lf , %lf", &gu, &mu, &used, &total, &power) == 5 ||
+                   sscanf(line, " %d, %d, %lf, %lf, %lf", &gu, &mu, &used, &total, &power) == 5) {
             if (gpu_util) *gpu_util = gu;
             if (mem_util) *mem_util = mu;
             if (mem_used_mb) *mem_used_mb = used;
@@ -390,14 +476,20 @@ static void cli_runtime_monitor_log_sample(
         double q8f32_gib,
         double cuda_free_gib,
         double cuda_total_gib,
+        double proc_cpu_pct,
+        double sys_cpu_pct,
+        double cpu_freq_mhz,
         int gpu_util,
         int mem_util,
         double gpu_mem_used_gib,
         double gpu_mem_total_gib,
-        double power_w) {
+        double power_w,
+        double sm_clock_mhz,
+        double mem_clock_mhz,
+        double temp_c) {
     if (!m || !m->log_fp) return;
     fprintf(m->log_fp,
-            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f\n",
+            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
             elapsed_s,
             phase ? phase : "idle",
             current,
@@ -411,11 +503,17 @@ static void cli_runtime_monitor_log_sample(
             q8f32_gib,
             cuda_free_gib,
             cuda_total_gib,
+            proc_cpu_pct,
+            sys_cpu_pct,
+            cpu_freq_mhz,
             gpu_util,
             mem_util,
             gpu_mem_used_gib,
             gpu_mem_total_gib,
-            power_w);
+            power_w,
+            sm_clock_mhz,
+            mem_clock_mhz,
+            temp_c);
     fflush(m->log_fp);
 }
 
@@ -424,6 +522,12 @@ static void *cli_runtime_monitor_main(void *arg) {
     uint64_t last_read = 0, last_write = 0;
     bool have_io = cli_read_proc_io(&last_read, &last_write);
     double last_t = cli_now_sec();
+    cli_cpu_sample cpu_prev = {0};
+    cpu_prev.cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (cpu_prev.cpu_count <= 0) cpu_prev.cpu_count = 1;
+    cpu_prev.proc_cpu_sec = cli_read_proc_cpu_time_sec();
+    cpu_prev.have_cpu = cli_read_proc_stat(&cpu_prev.total_ticks, &cpu_prev.idle_ticks) &&
+                        cpu_prev.proc_cpu_sec >= 0.0;
     while (!m->stop) {
         const useconds_t sleep_us = (useconds_t)(m->interval_s > 0.01f ? m->interval_s * 1000000.0f : 1000000.0f);
         usleep(sleep_us);
@@ -444,6 +548,27 @@ static void *cli_runtime_monitor_main(void *arg) {
             last_read = read_b;
             last_write = write_b;
         }
+
+        double proc_cpu_pct = -1.0;
+        double sys_cpu_pct = -1.0;
+        double cpu_freq_mhz = cli_read_avg_cpu_freq_mhz();
+        cli_cpu_sample cpu_now = {0};
+        cpu_now.cpu_count = cpu_prev.cpu_count;
+        cpu_now.proc_cpu_sec = cli_read_proc_cpu_time_sec();
+        cpu_now.have_cpu = cli_read_proc_stat(&cpu_now.total_ticks, &cpu_now.idle_ticks) &&
+                           cpu_now.proc_cpu_sec >= 0.0;
+        if (cpu_prev.have_cpu && cpu_now.have_cpu) {
+            const uint64_t total_delta = cpu_now.total_ticks - cpu_prev.total_ticks;
+            const uint64_t idle_delta = cpu_now.idle_ticks - cpu_prev.idle_ticks;
+            const double proc_delta = cpu_now.proc_cpu_sec - cpu_prev.proc_cpu_sec;
+            if (total_delta > 0) {
+                sys_cpu_pct = 100.0 * (1.0 - (double)idle_delta / (double)total_delta);
+            }
+            if (dt > 1.0e-6) {
+                proc_cpu_pct = 100.0 * proc_delta / (dt * (double)cpu_prev.cpu_count);
+            }
+        }
+        cpu_prev = cpu_now;
 
         const char *phase = "idle";
         int current = 0, total = 0;
@@ -480,16 +605,21 @@ static void *cli_runtime_monitor_main(void *arg) {
         smi_buf[0] = '\0';
         int gpu_util = -1, mem_util = -1;
         double mem_used_mb = -1.0, mem_total_mb = -1.0, power_w = -1.0;
+        double sm_clock_mhz = -1.0, mem_clock_mhz = -1.0, temp_c = -1.0;
         if (m->backend == DS4_BACKEND_CUDA) {
-            if (cli_query_nvidia_smi(&gpu_util, &mem_util, &mem_used_mb, &mem_total_mb, &power_w)) {
+            if (cli_query_nvidia_smi(&gpu_util, &mem_util, &mem_used_mb, &mem_total_mb, &power_w,
+                                     &sm_clock_mhz, &mem_clock_mhz, &temp_c)) {
                 snprintf(smi_buf,
                          sizeof(smi_buf),
-                         " gpu_util=%d%% gpu_mem_util=%d%% gpu_mem=%.2f/%.2fGiB power=%.1fW",
+                         " gpu_util=%d%% gpu_mem_util=%d%% gpu_mem=%.2f/%.2fGiB power=%.1fW sm_clk=%.0fMHz mem_clk=%.0fMHz temp=%.0fC",
                          gpu_util,
                          mem_util,
                          mem_used_mb / 1024.0,
                          mem_total_mb / 1024.0,
-                         power_w);
+                         power_w,
+                         sm_clock_mhz,
+                         mem_clock_mhz,
+                         temp_c);
             }
         }
 
@@ -508,19 +638,28 @@ static void *cli_runtime_monitor_main(void *arg) {
             q8f32_gib,
             cuda_free_gib,
             cuda_total_gib,
+            proc_cpu_pct,
+            sys_cpu_pct,
+            cpu_freq_mhz,
             gpu_util,
             mem_util,
             mem_used_mb >= 0.0 ? mem_used_mb / 1024.0 : -1.0,
             mem_total_mb >= 0.0 ? mem_total_mb / 1024.0 : -1.0,
-            power_w);
+            power_w,
+            sm_clock_mhz,
+            mem_clock_mhz,
+            temp_c);
 
         fprintf(stderr,
-                "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
+                "ds4: runtime-monitor phase=%s progress=%d/%d rss=%.2fGiB hwm=%.2fGiB cpu=%.1f%% sys_cpu=%.1f%% cpu_freq=%.0fMHz io_read=%.2fMiB/s io_write=%.2fMiB/s%s%s\n",
                 phase,
                 current,
                 total,
                 (double)rss_kib / 1048576.0,
                 (double)hwm_kib / 1048576.0,
+                proc_cpu_pct,
+                sys_cpu_pct,
+                cpu_freq_mhz,
                 read_mibs,
                 write_mibs,
                 cuda_buf,
@@ -562,7 +701,7 @@ static void cli_runtime_monitor_start(cli_runtime_monitor *m, const cli_config *
     if (m->log_path[0]) {
         m->log_fp = fopen(m->log_path, "wb");
         if (m->log_fp) {
-            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w\n", m->log_fp);
+            fputs("time_s,phase,current,total,rss_gib,hwm_gib,io_read_mibs,io_write_mibs,cuda_model_gib,q8f16_gib,q8f32_gib,cuda_free_gib,cuda_total_gib,proc_cpu_pct,sys_cpu_pct,cpu_freq_mhz,gpu_util_pct,gpu_mem_util_pct,gpu_mem_used_gib,gpu_mem_total_gib,power_w,gpu_sm_clock_mhz,gpu_mem_clock_mhz,gpu_temp_c\n", m->log_fp);
             fflush(m->log_fp);
             fprintf(stderr, "ds4: runtime-monitor logging to %s\n", m->log_path);
         } else {
