@@ -29,6 +29,7 @@
 typedef struct {
     const char *prompt;
     const char *system;
+    int prompt_token_limit;
     int n_predict;
     int ctx_size;
     float temperature;
@@ -174,6 +175,8 @@ static void usage(FILE *fp) {
         "      Prompt to generate from.\n"
         "  --prompt-file FILE\n"
         "      Read the prompt text from FILE.\n"
+        "  --prompt-token-limit N\n"
+        "      After tokenization, keep only the first N prompt tokens.\n"
         "  -sys, --system TEXT\n"
         "      System prompt. Empty string disables the default. Default: You are a helpful assistant\n"
         "  -n, --tokens N\n"
@@ -821,7 +824,7 @@ static void cli_runtime_monitor_log_sample(
         int proc_count) {
     if (!m || !m->log_fp) return;
     fprintf(m->log_fp,
-            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
             elapsed_s,
             phase ? phase : "idle",
             current,
@@ -1363,6 +1366,9 @@ static void build_prompt(ds4_engine *engine, const cli_generation_options *gen, 
     } else {
         ds4_encode_chat_prompt(engine, gen->system, gen->prompt,
                                cli_effective_think_mode(gen), out);
+    }
+    if (gen->prompt_token_limit > 0 && out->len > gen->prompt_token_limit) {
+        out->len = gen->prompt_token_limit;
     }
 }
 
@@ -2295,6 +2301,8 @@ static cli_config parse_options(int argc, char **argv) {
             }
             c.prompt_owned = read_prompt_file(need_arg(&i, argc, argv, arg), true);
             c.gen.prompt = c.prompt_owned;
+        } else if (!strcmp(arg, "--prompt-token-limit")) {
+            c.gen.prompt_token_limit = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-sys") || !strcmp(arg, "--system")) {
             c.gen.system = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
