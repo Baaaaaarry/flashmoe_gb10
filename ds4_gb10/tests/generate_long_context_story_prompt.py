@@ -8,6 +8,7 @@ the spelled-out numbers to digits, and emit a parseable list.
 
 from __future__ import annotations
 
+import argparse
 import random
 from pathlib import Path
 
@@ -131,13 +132,13 @@ def assignment_sentence(name: str, word: str) -> str:
     )
 
 
-def make_story() -> str:
+def make_story(scene_count: int) -> str:
     rng = random.Random(20260513)
     names = [name for name, _, _ in FACTS]
     fact_by_scene = {7 + i * 11: fact for i, fact in enumerate(FACTS)}
     scenes: list[str] = []
 
-    for scene_index in range(190):
+    for scene_index in range(scene_count):
         lead = rng.choice(names)
         friend = rng.choice([n for n in names if n != lead])
         template = SCENE_TEMPLATES[scene_index % len(SCENE_TEMPLATES)]
@@ -177,10 +178,9 @@ No bullets, no prose, no explanation.
     return OPENING + "\n".join(scenes) + question
 
 
-def main() -> None:
-    root = Path(__file__).resolve().parent
-    story = make_story()
-    rendered = (
+def render_story(scene_count: int) -> str:
+    story = make_story(scene_count)
+    return (
         BOS
         + "You are a careful assistant. Read the story, remember the assignments, "
         + "and answer the final task exactly."
@@ -189,7 +189,38 @@ def main() -> None:
         + ASSISTANT
         + "</think>"
     )
-    (root / "long_context_story_prompt.txt").write_text(rendered, encoding="utf-8")
+
+
+def estimate_tokens(text: str) -> int:
+    # Crude but monotonic estimate used only to scale the story length before
+    # ds4 performs the exact tokenizer-based cutoff at runtime.
+    return max(1, len(text) // 4)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate a long ds4 prompt with configurable minimum token length.")
+    parser.add_argument("--min-tokens", type=int, default=0,
+                        help="grow the story until the rendered prompt is at least this long (rough estimate)")
+    parser.add_argument("--scene-count", type=int, default=190,
+                        help="explicit scene count to render when --min-tokens is not used")
+    parser.add_argument("--output", type=Path,
+                        help="output prompt path; defaults to tests/long_context_story_prompt.txt")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parent
+    out_path = args.output or (root / "long_context_story_prompt.txt")
+
+    scene_count = args.scene_count
+    rendered = render_story(scene_count)
+    if args.min_tokens > 0:
+        # Increase scenes until the rough token estimate comfortably exceeds the
+        # requested minimum. ds4 will still enforce exact token limits.
+        while estimate_tokens(rendered) < args.min_tokens:
+            scene_count = max(scene_count + 32, int(scene_count * 1.25))
+            rendered = render_story(scene_count)
+
+    out_path.write_text(rendered, encoding="utf-8")
+    print(f"wrote {out_path} (scene_count={scene_count}, estimated_tokens~{estimate_tokens(rendered)})")
 
 
 if __name__ == "__main__":

@@ -824,7 +824,7 @@ static void cli_runtime_monitor_log_sample(
         int proc_count) {
     if (!m || !m->log_fp) return;
     fprintf(m->log_fp,
-            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
+            "%.6f,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f",
             elapsed_s,
             phase ? phase : "idle",
             current,
