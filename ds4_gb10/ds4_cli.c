@@ -57,11 +57,13 @@ typedef struct {
     char *runtime_monitor_log_owned;
     char *kv_cache_contexts_owned;
     bool inspect;
+    bool graph_profile;
     bool kv_cache_report;
     bool runtime_monitor;
     float runtime_monitor_interval;
     const char *runtime_monitor_log_path;
     const char *kv_cache_contexts;
+    int graph_profile_prompt_len;
     const char *flashmoe_export_dir;
     const char *flashmoe_export_manifest;
 } cli_config;
@@ -215,6 +217,10 @@ static void usage(FILE *fp) {
         "      Print theoretical and measured KV/context buffer usage for one or more context sizes.\n"
         "  --kv-cache-contexts LIST\n"
         "      Comma-separated context sizes for --kv-cache-report. Default: 1024,8192,65536,131072,1048576\n"
+        "  --graph-profile\n"
+        "      Print a layer/subgraph/op/tensor execution profile with estimated FLOPs and byte traffic.\n"
+        "  --graph-profile-prompt-len N\n"
+        "      Prompt length used by --graph-profile when -p/--prompt-file is not provided. Default: 1024\n"
         "  --runtime-monitor\n"
         "      Print periodic runtime metrics for RSS/HWM, process I/O, CUDA cache, and GPU load.\n"
         "  --runtime-monitor-interval F\n"
@@ -2280,6 +2286,7 @@ static cli_config parse_options(int argc, char **argv) {
             .dump_logprobs_top_k = 20,
             .think_mode = DS4_THINK_HIGH,
         },
+        .graph_profile_prompt_len = 1024,
     };
 
     bool directional_steering_scale_set = false;
@@ -2387,6 +2394,10 @@ static cli_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--kv-cache-contexts")) {
             c.kv_cache_contexts_owned = strdup(need_arg(&i, argc, argv, arg));
             c.kv_cache_contexts = c.kv_cache_contexts_owned;
+        } else if (!strcmp(arg, "--graph-profile")) {
+            c.graph_profile = true;
+        } else if (!strcmp(arg, "--graph-profile-prompt-len")) {
+            c.graph_profile_prompt_len = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--runtime-monitor")) {
             c.runtime_monitor = true;
         } else if (!strcmp(arg, "--runtime-monitor-interval")) {
@@ -2461,7 +2472,21 @@ int main(int argc, char **argv) {
         return 1;
     }
     int rc = 0;
-    if (cfg.inspect) {
+    if (cfg.graph_profile) {
+        int prompt_tokens = cfg.graph_profile_prompt_len;
+        if (cfg.gen.prompt != NULL) {
+            ds4_tokens prof = {0};
+            ds4_encode_chat_prompt(engine,
+                                   cfg.gen.system,
+                                   cfg.gen.prompt,
+                                   cli_effective_think_mode(&cfg.gen),
+                                   &prof);
+            prompt_tokens = prof.len > 0 ? prof.len : prompt_tokens;
+            ds4_tokens_free(&prof);
+        }
+        cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "graph-profile");
+        rc = ds4_engine_graph_profile(engine, cfg.gen.ctx_size, prompt_tokens, stdout);
+    } else if (cfg.inspect) {
         cli_runtime_monitor_set_phase(g_cli_runtime_monitor, "inspect");
         ds4_engine_summary(engine);
         if (cfg.flashmoe_export_dir) {

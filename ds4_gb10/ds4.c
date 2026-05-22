@@ -1256,6 +1256,93 @@ static void print_size(uint64_t bytes) {
     printf("%.2f GiB", (double)bytes / gib);
 }
 
+static double bytes_to_gib_f(uint64_t bytes) {
+    return (double)bytes / (1024.0 * 1024.0 * 1024.0);
+}
+
+static double flops_to_gflop_f(double flops) {
+    return flops / 1.0e9;
+}
+
+static void print_tensor_dims(FILE *fp, const ds4_tensor *t) {
+    fputc('[', fp);
+    for (uint32_t i = 0; i < t->ndim; i++) {
+        if (i) fputs("x", fp);
+        fprintf(fp, "%" PRIu64, t->dim[i]);
+    }
+    fputc(']', fp);
+}
+
+static void print_weight_tensor(FILE *fp, const char *role, const ds4_tensor *t) {
+    if (!t) return;
+    fprintf(fp, "          tensor %-14s name=%.*s type=%s dims=",
+            role,
+            (int)t->name.len, t->name.ptr,
+            tensor_type_name(t->type));
+    print_tensor_dims(fp, t);
+    fprintf(fp, " bytes=%.3f GiB\n", bytes_to_gib_f(t->bytes));
+}
+
+static void print_logical_tensor(FILE *fp, const char *role, uint64_t rows, uint64_t cols) {
+    fprintf(fp, "          tensor %-14s logical=f32[%" PRIu64 "x%" PRIu64 "] bytes=%.3f GiB\n",
+            role,
+            rows, cols,
+            bytes_to_gib_f(rows * cols * sizeof(float)));
+}
+
+typedef struct {
+    double flops_per_token;
+    double flops_total;
+    uint64_t weight_bytes_per_chunk;
+    uint64_t weight_bytes_total;
+    uint64_t activation_read_bytes_per_token;
+    uint64_t activation_write_bytes_per_token;
+    uint64_t kv_state_bytes_per_token;
+    uint64_t ssd_bytes_per_chunk;
+} ds4_op_cost;
+
+typedef struct {
+    double flops_total;
+    uint64_t weight_total;
+    uint64_t activation_rw_total;
+    uint64_t kv_state_total;
+    uint64_t ssd_total;
+} ds4_cost_accum;
+
+static void accum_op_cost(ds4_cost_accum *acc, const ds4_op_cost *c, uint64_t prompt_tokens) {
+    if (!acc || !c) return;
+    acc->flops_total += c->flops_total;
+    acc->weight_total += c->weight_bytes_total;
+    acc->activation_rw_total +=
+        (c->activation_read_bytes_per_token + c->activation_write_bytes_per_token) * prompt_tokens;
+    acc->kv_state_total += c->kv_state_bytes_per_token * prompt_tokens;
+    acc->ssd_total += c->ssd_bytes_per_chunk;
+}
+
+static void print_op_cost(FILE *fp,
+                          const char *layer_label,
+                          const char *subgraph,
+                          const char *op_name,
+                          const char *formula,
+                          const ds4_op_cost *cost) {
+    fprintf(fp,
+            "    op layer=%s subgraph=%s name=%s\n"
+            "      formula: %s\n"
+            "      cost: flops/token=%.3f GF total_prefill=%.3f TF weight/chunk=%.3f GiB weight_total=%.3f GiB act_read/token=%.3f MiB act_write/token=%.3f MiB kv_state/token=%.3f MiB ssd/chunk=%.3f GiB\n",
+            layer_label,
+            subgraph,
+            op_name,
+            formula,
+            flops_to_gflop_f(cost->flops_per_token),
+            cost->flops_total / 1.0e12,
+            bytes_to_gib_f(cost->weight_bytes_per_chunk),
+            bytes_to_gib_f(cost->weight_bytes_total),
+            (double)cost->activation_read_bytes_per_token / (1024.0 * 1024.0),
+            (double)cost->activation_write_bytes_per_token / (1024.0 * 1024.0),
+            (double)cost->kv_state_bytes_per_token / (1024.0 * 1024.0),
+            bytes_to_gib_f(cost->ssd_bytes_per_chunk));
+}
+
 static void model_summary(const ds4_model *m) {
     ds4_str name = {0};
     ds4_str arch = {0};
@@ -18231,6 +18318,387 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
 
 void ds4_engine_summary(ds4_engine *e) {
     model_summary(&e->model);
+}
+
+int ds4_engine_graph_profile(ds4_engine *e, int ctx_size, int prompt_tokens, FILE *fp) {
+    if (!e || !fp || ctx_size <= 0 || prompt_tokens <= 0) return 1;
+
+    const uint64_t ptok = (uint64_t)prompt_tokens;
+    const uint64_t chunk = 2048u;
+    const uint64_t n_chunks = (ptok + chunk - 1u) / chunk;
+    const uint64_t batch_tokens = ptok < chunk ? ptok : chunk;
+    const uint64_t avg_intra_ctx = batch_tokens / 2u;
+    const uint64_t raw_window = DS4_N_SWA;
+    const uint64_t raw_rows_avg = ptok <= (uint64_t)(raw_window + 1u)
+        ? (ptok > 0 ? (ptok - 1u) / 2u : 0u)
+        : raw_window;
+    const ds4_context_memory mem = ds4_context_memory_estimate(e->backend, ctx_size);
+
+    fprintf(fp,
+            "ds4 graph profile\n"
+            "  backend=%s ctx=%d prompt_tokens=%d prefill_chunk=%" PRIu64 " chunks=%" PRIu64 "\n"
+            "  raw_cap=%u comp_cap=%u context_buffers=%.3f GiB raw_rows_avg=%" PRIu64 " intra_ctx_avg=%" PRIu64 "\n",
+            ds4_backend_name(e->backend),
+            ctx_size,
+            prompt_tokens,
+            chunk,
+            n_chunks,
+            mem.raw_cap,
+            mem.comp_cap,
+            bytes_to_gib_f(mem.total_bytes),
+            raw_rows_avg,
+            avg_intra_ctx);
+
+    ds4_cost_accum total = {0};
+
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const uint32_t ratio = ds4_layer_compress_ratio(il);
+        const uint32_t coff = ratio == 4 ? 2u : 1u;
+        const uint64_t comp_rows = ratio == 0 ? 0u : (ptok / ratio + 2u);
+        const uint64_t cross_rows_avg = ratio == 0 ? 0u : (ptok / (2u * ratio) + 2u);
+        const char *layer_kind = ratio == 0 ? "raw" : (ratio == 4 ? "csa" : "hca");
+        char layer_label[32];
+        snprintf(layer_label, sizeof(layer_label), "%u(%s)", il, layer_kind);
+        fprintf(fp, "  layer %s ratio=%u\n", layer_label, ratio);
+
+        ds4_cost_accum layer_acc = {0};
+        const ds4_layer_weights *l = &e->weights.layer[il];
+
+        {
+            ds4_op_cost c = {
+                .flops_per_token = 8.0 * DS4_N_EMBD,
+                .flops_total = 8.0 * DS4_N_EMBD * ptok,
+                .activation_read_bytes_per_token = DS4_N_EMBD * sizeof(float),
+                .activation_write_bytes_per_token = DS4_N_EMBD * sizeof(float),
+            };
+            print_op_cost(fp, layer_label, "attention", "attn_norm",
+                          "8 * hidden_dim",
+                          &c);
+            print_weight_tensor(fp, "weight", l->attn_norm);
+            print_logical_tensor(fp, "input", ptok, DS4_N_EMBD);
+            print_logical_tensor(fp, "output", ptok, DS4_N_EMBD);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            const uint64_t in_dim = l->attn_q_a->dim[0], out_dim = l->attn_q_a->dim[1];
+            ds4_op_cost c = {
+                .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+                .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                .weight_bytes_per_chunk = l->attn_q_a->bytes,
+                .weight_bytes_total = l->attn_q_a->bytes * n_chunks,
+                .activation_read_bytes_per_token = in_dim * sizeof(float),
+                .activation_write_bytes_per_token = out_dim * sizeof(float),
+                .ssd_bytes_per_chunk = l->attn_q_a->bytes,
+            };
+            print_op_cost(fp, layer_label, "attention", "attn_q_a",
+                          "2 * hidden_dim * lora_q",
+                          &c);
+            print_weight_tensor(fp, "weight", l->attn_q_a);
+            print_logical_tensor(fp, "input", ptok, in_dim);
+            print_logical_tensor(fp, "output", ptok, out_dim);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            const uint64_t in_dim = l->attn_q_b->dim[0], out_dim = l->attn_q_b->dim[1];
+            ds4_op_cost c = {
+                .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+                .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                .weight_bytes_per_chunk = l->attn_q_b->bytes,
+                .weight_bytes_total = l->attn_q_b->bytes * n_chunks,
+                .activation_read_bytes_per_token = in_dim * sizeof(float),
+                .activation_write_bytes_per_token = out_dim * sizeof(float),
+                .ssd_bytes_per_chunk = l->attn_q_b->bytes,
+            };
+            print_op_cost(fp, layer_label, "attention", "attn_q_b",
+                          "2 * lora_q * (heads * head_dim)",
+                          &c);
+            print_weight_tensor(fp, "weight", l->attn_q_b);
+            print_logical_tensor(fp, "input", ptok, in_dim);
+            print_logical_tensor(fp, "output", ptok, out_dim);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            const uint64_t in_dim = l->attn_kv->dim[0], out_dim = l->attn_kv->dim[1];
+            ds4_op_cost c = {
+                .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+                .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                .weight_bytes_per_chunk = l->attn_kv->bytes,
+                .weight_bytes_total = l->attn_kv->bytes * n_chunks,
+                .activation_read_bytes_per_token = in_dim * sizeof(float),
+                .activation_write_bytes_per_token = out_dim * sizeof(float),
+                .ssd_bytes_per_chunk = l->attn_kv->bytes,
+            };
+            print_op_cost(fp, layer_label, "attention", "attn_kv",
+                          "2 * hidden_dim * kv_dim",
+                          &c);
+            print_weight_tensor(fp, "weight", l->attn_kv);
+            print_logical_tensor(fp, "input", ptok, in_dim);
+            print_logical_tensor(fp, "output", ptok, out_dim);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            ds4_op_cost c = {
+                .flops_per_token = 4.0 * DS4_N_HEAD * DS4_N_HEAD_DIM * (double)avg_intra_ctx,
+                .flops_total = 4.0 * (double)ptok * DS4_N_HEAD * DS4_N_HEAD_DIM * (double)avg_intra_ctx,
+                .activation_read_bytes_per_token = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM * sizeof(float),
+                .activation_write_bytes_per_token = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM * sizeof(float),
+                .kv_state_bytes_per_token = raw_rows_avg * DS4_N_HEAD_DIM * sizeof(float),
+            };
+            print_op_cost(fp, layer_label, "attention", "raw_window_attention",
+                          "4 * n_head * head_dim * avg_chunk_context",
+                          &c);
+            print_logical_tensor(fp, "q", ptok, (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM);
+            print_logical_tensor(fp, "out_heads", ptok, (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        if (ratio != 0) {
+            const uint64_t comp_width = (uint64_t)coff * DS4_N_HEAD_DIM;
+            {
+                const uint64_t in_dim = l->attn_compressor_kv->dim[0], out_dim = l->attn_compressor_kv->dim[1];
+                ds4_op_cost c = {
+                    .flops_per_token = 4.0 * (double)in_dim * (double)out_dim,
+                    .flops_total = 4.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                    .weight_bytes_per_chunk = l->attn_compressor_kv->bytes + l->attn_compressor_gate->bytes,
+                    .weight_bytes_total = (l->attn_compressor_kv->bytes + l->attn_compressor_gate->bytes) * n_chunks,
+                    .activation_read_bytes_per_token = in_dim * sizeof(float),
+                    .activation_write_bytes_per_token = 2u * out_dim * sizeof(float),
+                    .kv_state_bytes_per_token = comp_width * sizeof(float),
+                    .ssd_bytes_per_chunk = l->attn_compressor_kv->bytes + l->attn_compressor_gate->bytes,
+                };
+                print_op_cost(fp, layer_label, "attention", "compressor",
+                              "2 * hidden_dim * comp_width for kv + 2 * hidden_dim * comp_width for gate",
+                              &c);
+                print_weight_tensor(fp, "kv_weight", l->attn_compressor_kv);
+                print_weight_tensor(fp, "gate_weight", l->attn_compressor_gate);
+                print_logical_tensor(fp, "input", ptok, in_dim);
+                print_logical_tensor(fp, "pooled", ptok, out_dim);
+                accum_op_cost(&layer_acc, &c, ptok);
+            }
+            {
+                ds4_op_cost c = {
+                    .flops_per_token = 4.0 * DS4_N_HEAD * DS4_N_HEAD_DIM * (double)cross_rows_avg,
+                    .flops_total = 4.0 * (double)ptok * DS4_N_HEAD * DS4_N_HEAD_DIM * (double)cross_rows_avg,
+                    .activation_read_bytes_per_token = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM * sizeof(float),
+                    .activation_write_bytes_per_token = (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM * sizeof(float),
+                    .kv_state_bytes_per_token = comp_rows * DS4_N_HEAD_DIM * sizeof(float),
+                };
+                print_op_cost(fp, layer_label, "attention", "compressed_attention",
+                              "4 * n_head * head_dim * avg_visible_compressed_rows",
+                              &c);
+                print_logical_tensor(fp, "comp_kv", comp_rows, DS4_N_HEAD_DIM);
+                print_logical_tensor(fp, "out_heads", ptok, (uint64_t)DS4_N_HEAD * DS4_N_HEAD_DIM);
+                accum_op_cost(&layer_acc, &c, ptok);
+            }
+            if (ratio == 4) {
+                const uint64_t in_dim = l->indexer_proj->dim[0], out_dim = l->indexer_proj->dim[1];
+                ds4_op_cost c = {
+                    .flops_per_token = 2.0 * (double)in_dim * (double)out_dim +
+                                       4.0 * DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * (double)cross_rows_avg +
+                                       4.0 * (double)DS4_N_EMBD * (2.0 * DS4_N_INDEXER_HEAD_DIM),
+                    .flops_total = (2.0 * (double)in_dim * (double)out_dim +
+                                    4.0 * DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * (double)cross_rows_avg +
+                                    4.0 * (double)DS4_N_EMBD * (2.0 * DS4_N_INDEXER_HEAD_DIM)) * (double)ptok,
+                    .weight_bytes_per_chunk = l->indexer_proj->bytes + l->indexer_attn_q_b->bytes +
+                                              l->indexer_compressor_kv->bytes + l->indexer_compressor_gate->bytes,
+                    .weight_bytes_total = (l->indexer_proj->bytes + l->indexer_attn_q_b->bytes +
+                                           l->indexer_compressor_kv->bytes + l->indexer_compressor_gate->bytes) * n_chunks,
+                    .activation_read_bytes_per_token = (uint64_t)DS4_N_EMBD * sizeof(float),
+                    .activation_write_bytes_per_token = (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM * sizeof(float),
+                    .kv_state_bytes_per_token = comp_rows * DS4_N_INDEXER_HEAD_DIM * sizeof(float),
+                    .ssd_bytes_per_chunk = l->indexer_proj->bytes + l->indexer_attn_q_b->bytes +
+                                           l->indexer_compressor_kv->bytes + l->indexer_compressor_gate->bytes,
+                };
+                print_op_cost(fp, layer_label, "attention", "indexer",
+                              "proj + q_b + indexed scores/topk + index compressor",
+                              &c);
+                print_weight_tensor(fp, "proj_weight", l->indexer_proj);
+                print_weight_tensor(fp, "q_b_weight", l->indexer_attn_q_b);
+                print_weight_tensor(fp, "kv_weight", l->indexer_compressor_kv);
+                print_weight_tensor(fp, "gate_weight", l->indexer_compressor_gate);
+                accum_op_cost(&layer_acc, &c, ptok);
+            }
+        }
+        {
+            const uint64_t in_dim = l->attn_output_a->dim[0], out_dim = l->attn_output_a->dim[1];
+            ds4_op_cost c = {
+                .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+                .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                .weight_bytes_per_chunk = l->attn_output_a->bytes,
+                .weight_bytes_total = l->attn_output_a->bytes * n_chunks,
+                .activation_read_bytes_per_token = in_dim * sizeof(float),
+                .activation_write_bytes_per_token = out_dim * sizeof(float),
+                .ssd_bytes_per_chunk = l->attn_output_a->bytes,
+            };
+            print_op_cost(fp, layer_label, "attention", "attn_output_a",
+                          "2 * (heads/group * head_dim) * out_low_dim",
+                          &c);
+            print_weight_tensor(fp, "weight", l->attn_output_a);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            const uint64_t in_dim = l->attn_output_b->dim[0], out_dim = l->attn_output_b->dim[1];
+            ds4_op_cost c = {
+                .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+                .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                .weight_bytes_per_chunk = l->attn_output_b->bytes,
+                .weight_bytes_total = l->attn_output_b->bytes * n_chunks,
+                .activation_read_bytes_per_token = in_dim * sizeof(float),
+                .activation_write_bytes_per_token = out_dim * sizeof(float),
+                .ssd_bytes_per_chunk = l->attn_output_b->bytes,
+            };
+            print_op_cost(fp, layer_label, "attention", "attn_output_b",
+                          "2 * out_low_dim * hidden_dim",
+                          &c);
+            print_weight_tensor(fp, "weight", l->attn_output_b);
+            print_logical_tensor(fp, "output", ptok, out_dim);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+
+        {
+            ds4_op_cost c = {
+                .flops_per_token = 8.0 * DS4_N_EMBD,
+                .flops_total = 8.0 * DS4_N_EMBD * ptok,
+                .activation_read_bytes_per_token = DS4_N_EMBD * sizeof(float),
+                .activation_write_bytes_per_token = DS4_N_EMBD * sizeof(float),
+            };
+            print_op_cost(fp, layer_label, "ffn", "ffn_norm",
+                          "8 * hidden_dim",
+                          &c);
+            print_weight_tensor(fp, "weight", l->ffn_norm);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            const uint64_t in_dim = l->ffn_gate_inp->dim[0], out_dim = l->ffn_gate_inp->dim[1];
+            ds4_op_cost c = {
+                .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+                .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+                .weight_bytes_per_chunk = l->ffn_gate_inp->bytes + (l->ffn_exp_probs_b ? l->ffn_exp_probs_b->bytes : 0u),
+                .weight_bytes_total = (l->ffn_gate_inp->bytes + (l->ffn_exp_probs_b ? l->ffn_exp_probs_b->bytes : 0u)) * n_chunks,
+                .activation_read_bytes_per_token = in_dim * sizeof(float),
+                .activation_write_bytes_per_token = out_dim * sizeof(float),
+                .ssd_bytes_per_chunk = l->ffn_gate_inp->bytes + (l->ffn_exp_probs_b ? l->ffn_exp_probs_b->bytes : 0u),
+            };
+            print_op_cost(fp, layer_label, "ffn", "router",
+                          "2 * hidden_dim * expert_count (+ bias/top-k bookkeeping)",
+                          &c);
+            print_weight_tensor(fp, "gate_inp", l->ffn_gate_inp);
+            print_weight_tensor(fp, "exp_bias", l->ffn_exp_probs_b);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            const uint64_t gate_bytes = (l->ffn_gate_exps->bytes * DS4_N_EXPERT_USED) / DS4_N_EXPERT;
+            const uint64_t up_bytes = (l->ffn_up_exps->bytes * DS4_N_EXPERT_USED) / DS4_N_EXPERT;
+            const uint64_t down_bytes = (l->ffn_down_exps->bytes * DS4_N_EXPERT_USED) / DS4_N_EXPERT;
+            ds4_op_cost c = {
+                .flops_per_token =
+                    2.0 * DS4_N_EXPERT_USED * DS4_N_EMBD * DS4_N_FF_EXP +
+                    2.0 * DS4_N_EXPERT_USED * DS4_N_EMBD * DS4_N_FF_EXP +
+                    2.0 * DS4_N_EXPERT_USED * DS4_N_FF_EXP * DS4_N_EMBD,
+                .flops_total =
+                    (2.0 * DS4_N_EXPERT_USED * DS4_N_EMBD * DS4_N_FF_EXP * 2.0 +
+                     2.0 * DS4_N_EXPERT_USED * DS4_N_FF_EXP * DS4_N_EMBD) * (double)ptok,
+                .weight_bytes_per_chunk = gate_bytes + up_bytes + down_bytes,
+                .weight_bytes_total = (gate_bytes + up_bytes + down_bytes) * n_chunks,
+                .activation_read_bytes_per_token = DS4_N_EMBD * sizeof(float),
+                .activation_write_bytes_per_token = DS4_N_EMBD * sizeof(float),
+                .ssd_bytes_per_chunk = gate_bytes + up_bytes + down_bytes,
+            };
+            print_op_cost(fp, layer_label, "ffn", "routed_moe",
+                          "2 * active_experts * (hidden*ff + hidden*ff + ff*hidden)",
+                          &c);
+            print_weight_tensor(fp, "gate_exps", l->ffn_gate_exps);
+            print_weight_tensor(fp, "up_exps", l->ffn_up_exps);
+            print_weight_tensor(fp, "down_exps", l->ffn_down_exps);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+        {
+            ds4_op_cost c = {
+                .flops_per_token =
+                    2.0 * DS4_N_EMBD * DS4_N_FF_EXP +
+                    2.0 * DS4_N_EMBD * DS4_N_FF_EXP +
+                    2.0 * DS4_N_FF_EXP * DS4_N_EMBD,
+                .flops_total =
+                    (2.0 * DS4_N_EMBD * DS4_N_FF_EXP * 2.0 +
+                     2.0 * DS4_N_FF_EXP * DS4_N_EMBD) * (double)ptok,
+                .weight_bytes_per_chunk = l->ffn_gate_shexp->bytes + l->ffn_up_shexp->bytes + l->ffn_down_shexp->bytes,
+                .weight_bytes_total = (l->ffn_gate_shexp->bytes + l->ffn_up_shexp->bytes + l->ffn_down_shexp->bytes) * n_chunks,
+                .activation_read_bytes_per_token = DS4_N_EMBD * sizeof(float),
+                .activation_write_bytes_per_token = DS4_N_EMBD * sizeof(float),
+                .ssd_bytes_per_chunk = l->ffn_gate_shexp->bytes + l->ffn_up_shexp->bytes + l->ffn_down_shexp->bytes,
+            };
+            print_op_cost(fp, layer_label, "ffn", "shared_expert",
+                          "2 * (hidden*ff + hidden*ff + ff*hidden)",
+                          &c);
+            print_weight_tensor(fp, "gate_shexp", l->ffn_gate_shexp);
+            print_weight_tensor(fp, "up_shexp", l->ffn_up_shexp);
+            print_weight_tensor(fp, "down_shexp", l->ffn_down_shexp);
+            accum_op_cost(&layer_acc, &c, ptok);
+        }
+
+        fprintf(fp,
+                "  layer-total %s flops=%.3f TF weight_total=%.3f GiB act_rw_total=%.3f GiB kv_state_total=%.3f GiB ssd_total=%.3f GiB\n",
+                layer_label,
+                layer_acc.flops_total / 1.0e12,
+                bytes_to_gib_f(layer_acc.weight_total),
+                bytes_to_gib_f(layer_acc.activation_rw_total),
+                bytes_to_gib_f(layer_acc.kv_state_total),
+                bytes_to_gib_f(layer_acc.ssd_total));
+        total.flops_total += layer_acc.flops_total;
+        total.weight_total += layer_acc.weight_total;
+        total.activation_rw_total += layer_acc.activation_rw_total;
+        total.kv_state_total += layer_acc.kv_state_total;
+        total.ssd_total += layer_acc.ssd_total;
+    }
+
+    {
+        ds4_op_cost c = {
+            .flops_per_token = 8.0 * DS4_N_EMBD,
+            .flops_total = 8.0 * DS4_N_EMBD * ptok,
+            .activation_read_bytes_per_token = DS4_N_EMBD * sizeof(float),
+            .activation_write_bytes_per_token = DS4_N_EMBD * sizeof(float),
+        };
+        print_op_cost(fp, "output", "head", "output_norm", "8 * hidden_dim", &c);
+        print_weight_tensor(fp, "weight", e->weights.output_norm);
+        total.flops_total += c.flops_total;
+        total.activation_rw_total += (c.activation_read_bytes_per_token + c.activation_write_bytes_per_token) * ptok;
+    }
+    {
+        const uint64_t in_dim = e->weights.output->dim[0], out_dim = e->weights.output->dim[1];
+        ds4_op_cost c = {
+            .flops_per_token = 2.0 * (double)in_dim * (double)out_dim,
+            .flops_total = 2.0 * (double)ptok * (double)in_dim * (double)out_dim,
+            .weight_bytes_per_chunk = e->weights.output->bytes,
+            .weight_bytes_total = e->weights.output->bytes * n_chunks,
+            .activation_read_bytes_per_token = in_dim * sizeof(float),
+            .activation_write_bytes_per_token = out_dim * sizeof(float),
+            .ssd_bytes_per_chunk = e->weights.output->bytes,
+        };
+        print_op_cost(fp, "output", "head", "lm_head", "2 * hidden_dim * vocab", &c);
+        print_weight_tensor(fp, "weight", e->weights.output);
+        total.flops_total += c.flops_total;
+        total.weight_total += c.weight_bytes_total;
+        total.activation_rw_total += (c.activation_read_bytes_per_token + c.activation_write_bytes_per_token) * ptok;
+        total.ssd_total += c.ssd_bytes_per_chunk;
+    }
+
+    fprintf(fp,
+            "ds4 graph profile total\n"
+            "  total_prefill_flops=%.3f TF\n"
+            "  total_weight_bytes=%.3f GiB\n"
+            "  total_activation_rw=%.3f GiB\n"
+            "  total_kv_state_rw=%.3f GiB\n"
+            "  total_ssd_cold=%.3f GiB\n"
+            "  per-token-average: flops=%.3f GF weight=%.3f GiB act_rw=%.3f GiB kv_state=%.3f GiB\n",
+            total.flops_total / 1.0e12,
+            bytes_to_gib_f(total.weight_total),
+            bytes_to_gib_f(total.activation_rw_total),
+            bytes_to_gib_f(total.kv_state_total),
+            bytes_to_gib_f(total.ssd_total),
+            flops_to_gflop_f(total.flops_total / (double)ptok),
+            bytes_to_gib_f((uint64_t)((double)total.weight_total / (double)ptok)),
+            bytes_to_gib_f((uint64_t)((double)total.activation_rw_total / (double)ptok)),
+            bytes_to_gib_f((uint64_t)((double)total.kv_state_total / (double)ptok)));
+    return 0;
 }
 
 void ds4_engine_close(ds4_engine *e) {
