@@ -158,17 +158,17 @@ static bool parse_json_u64_field(const char *obj, const char *key, uint64_t *out
     return true;
 }
 
-static bool manifest_push(ds4_flashmoe_manifest *manifest,
-                          ds4_flashmoe_manifest_entry *entry,
-                          size_t *cap) {
+static bool manifest_push_layer(ds4_flashmoe_manifest *manifest,
+                                ds4_flashmoe_layer_pack *layer,
+                                size_t *cap) {
     if (manifest->count == *cap) {
-        size_t new_cap = *cap ? *cap * 2u : 256u;
-        void *new_entries = realloc(manifest->entries, new_cap * sizeof(manifest->entries[0]));
-        if (!new_entries) return false;
-        manifest->entries = (ds4_flashmoe_manifest_entry *)new_entries;
+        size_t new_cap = *cap ? *cap * 2u : 64u;
+        void *new_layers = realloc(manifest->layers, new_cap * sizeof(manifest->layers[0]));
+        if (!new_layers) return false;
+        manifest->layers = (ds4_flashmoe_layer_pack *)new_layers;
         *cap = new_cap;
     }
-    manifest->entries[manifest->count++] = *entry;
+    manifest->layers[manifest->count++] = *layer;
     return true;
 }
 
@@ -190,6 +190,13 @@ int ds4_flashmoe_manifest_load(const char *path,
         return 1;
     }
 
+    uint64_t version = 0;
+    uint64_t layout_version = 0;
+    (void)parse_json_u64_field(text, "version", &version);
+    (void)parse_json_u64_field(text, "layout_version", &layout_version);
+    out->version = version != 0 ? (uint32_t)version : 1u;
+    out->layout_version = layout_version != 0 ? (uint32_t)layout_version : 1u;
+
     size_t cap = 0;
     char *p = text;
     while ((p = strchr(p, '{')) != NULL) {
@@ -206,29 +213,52 @@ int ds4_flashmoe_manifest_load(const char *path,
         memcpy(obj, p, n);
         obj[n] = '\0';
 
-        uint64_t layer = 0, expert = 0, offset = 0, size_bytes = 0;
+        uint64_t layer = 0;
+        uint64_t expert_size = 0;
+        uint64_t num_experts = 0;
+        uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
+        uint64_t gate_row_bytes = 0, up_row_bytes = 0, down_row_bytes = 0;
         char *entry_path = NULL;
         bool ok = parse_json_u64_field(obj, "layer_id", &layer) &&
-                  parse_json_u64_field(obj, "expert_id", &expert) &&
-                  parse_json_u64_field(obj, "offset", &offset) &&
-                  parse_json_u64_field(obj, "size_bytes", &size_bytes);
+                  parse_json_u64_field(obj, "expert_size", &expert_size) &&
+                  parse_json_u64_field(obj, "num_experts", &num_experts) &&
+                  parse_json_u64_field(obj, "gate_bytes", &gate_bytes) &&
+                  parse_json_u64_field(obj, "up_bytes", &up_bytes) &&
+                  parse_json_u64_field(obj, "down_bytes", &down_bytes) &&
+                  parse_json_u64_field(obj, "gate_row_bytes", &gate_row_bytes) &&
+                  parse_json_u64_field(obj, "up_row_bytes", &up_row_bytes) &&
+                  parse_json_u64_field(obj, "down_row_bytes", &down_row_bytes);
         if (ok) entry_path = dup_json_string_field(obj, "path");
         if (ok && entry_path) {
-            if (layer >= max_layers || expert >= max_experts) {
+            if (layer >= max_layers || num_experts == 0 || num_experts > max_experts) {
                 free(entry_path);
                 free(obj);
                 free(text);
                 ds4_flashmoe_manifest_free(out);
-                set_err(err, errlen, "manifest entry is outside ds4 model bounds");
+                set_err(err, errlen, "manifest layer pack is outside ds4 model bounds");
                 return 1;
             }
-            ds4_flashmoe_manifest_entry entry;
+            if (expert_size == 0 || gate_bytes + up_bytes + down_bytes != expert_size) {
+                free(entry_path);
+                free(obj);
+                free(text);
+                ds4_flashmoe_manifest_free(out);
+                set_err(err, errlen, "manifest layer pack layout is inconsistent");
+                return 1;
+            }
+            ds4_flashmoe_layer_pack entry;
+            memset(&entry, 0, sizeof(entry));
             entry.layer_id = (uint16_t)layer;
-            entry.expert_id = (uint16_t)expert;
             entry.path = entry_path;
-            entry.offset = offset;
-            entry.size_bytes = size_bytes;
-            if (!manifest_push(out, &entry, &cap)) {
+            entry.expert_size = expert_size;
+            entry.num_experts = num_experts;
+            entry.gate_bytes = gate_bytes;
+            entry.up_bytes = up_bytes;
+            entry.down_bytes = down_bytes;
+            entry.gate_row_bytes = gate_row_bytes;
+            entry.up_row_bytes = up_row_bytes;
+            entry.down_row_bytes = down_row_bytes;
+            if (!manifest_push_layer(out, &entry, &cap)) {
                 free(entry_path);
                 free(obj);
                 free(text);
@@ -244,17 +274,17 @@ int ds4_flashmoe_manifest_load(const char *path,
 
     if (out->count == 0) {
         ds4_flashmoe_manifest_free(out);
-        set_err(err, errlen, "no manifest entries parsed");
+        set_err(err, errlen, "no manifest layer packs parsed");
         return 1;
     }
 
     for (size_t i = 0; i < out->count; i++) {
         for (size_t j = i + 1; j < out->count; j++) {
-            const ds4_flashmoe_manifest_entry *a = &out->entries[i];
-            const ds4_flashmoe_manifest_entry *b = &out->entries[j];
-            if (a->layer_id == b->layer_id && a->expert_id == b->expert_id) {
+            const ds4_flashmoe_layer_pack *a = &out->layers[i];
+            const ds4_flashmoe_layer_pack *b = &out->layers[j];
+            if (a->layer_id == b->layer_id) {
                 ds4_flashmoe_manifest_free(out);
-                set_err(err, errlen, "duplicate layer/expert entry in manifest");
+                set_err(err, errlen, "duplicate layer pack entry in manifest");
                 return 1;
             }
         }
@@ -267,7 +297,7 @@ int ds4_flashmoe_manifest_load(const char *path,
         return 1;
     }
     for (size_t i = 0; i < out->count; i++) {
-        layer_counts[out->entries[i].layer_id]++;
+        layer_counts[out->layers[i].layer_id] = (size_t)out->layers[i].num_experts;
     }
     out->min_entries_per_layer = (size_t)-1;
     for (uint32_t il = 0; il < max_layers; il++) {
@@ -285,23 +315,19 @@ int ds4_flashmoe_manifest_load(const char *path,
 int ds4_flashmoe_manifest_validate_files(const ds4_flashmoe_manifest *manifest,
                                          char *err,
                                          size_t errlen) {
-    if (!manifest || !manifest->entries || manifest->count == 0) {
-        set_err(err, errlen, "manifest has no entries");
+    if (!manifest || !manifest->layers || manifest->count == 0) {
+        set_err(err, errlen, "manifest has no layer packs");
         return 1;
     }
     for (size_t i = 0; i < manifest->count; i++) {
-        const ds4_flashmoe_manifest_entry *entry = &manifest->entries[i];
+        const ds4_flashmoe_layer_pack *entry = &manifest->layers[i];
         struct stat st;
         if (stat(entry->path, &st) != 0) {
-            set_err(err, errlen, "manifest entry file is missing");
+            set_err(err, errlen, "manifest layer pack file is missing");
             return 1;
         }
-        if ((uint64_t)st.st_size < entry->offset) {
-            set_err(err, errlen, "manifest entry offset is outside file");
-            return 1;
-        }
-        if ((uint64_t)st.st_size - entry->offset < entry->size_bytes) {
-            set_err(err, errlen, "manifest entry size exceeds file bounds");
+        if ((uint64_t)st.st_size < entry->expert_size * entry->num_experts) {
+            set_err(err, errlen, "manifest layer pack size exceeds file bounds");
             return 1;
         }
     }
@@ -310,23 +336,22 @@ int ds4_flashmoe_manifest_validate_files(const ds4_flashmoe_manifest *manifest,
 
 void ds4_flashmoe_manifest_free(ds4_flashmoe_manifest *manifest) {
     if (!manifest) return;
-    if (manifest->entries) {
+    if (manifest->layers) {
         for (size_t i = 0; i < manifest->count; i++) {
-            free(manifest->entries[i].path);
+            free(manifest->layers[i].path);
         }
     }
-    free(manifest->entries);
+    free(manifest->layers);
     memset(manifest, 0, sizeof(*manifest));
 }
 
-const ds4_flashmoe_manifest_entry *ds4_flashmoe_manifest_find(
+const ds4_flashmoe_layer_pack *ds4_flashmoe_manifest_find_layer(
         const ds4_flashmoe_manifest *manifest,
-        uint16_t layer_id,
-        uint16_t expert_id) {
+        uint16_t layer_id) {
     if (!manifest) return NULL;
     for (size_t i = 0; i < manifest->count; i++) {
-        const ds4_flashmoe_manifest_entry *entry = &manifest->entries[i];
-        if (entry->layer_id == layer_id && entry->expert_id == expert_id) {
+        const ds4_flashmoe_layer_pack *entry = &manifest->layers[i];
+        if (entry->layer_id == layer_id) {
             return entry;
         }
     }
@@ -344,6 +369,7 @@ typedef struct {
 typedef struct {
     const ds4_flashmoe_manifest *manifest;
     ds4_flashmoe_blob_entry *entries;
+    int *layer_fds;
     size_t count;
     size_t cap;
     uint64_t used_bytes;
@@ -359,6 +385,12 @@ static void runtime_reset(ds4_flashmoe_runtime_state *rt) {
     for (size_t i = 0; i < rt->count; i++) {
         free(rt->entries[i].bytes);
     }
+    if (rt->layer_fds && rt->manifest) {
+        for (size_t i = 0; i < rt->manifest->count; i++) {
+            if (rt->layer_fds[i] >= 0) close(rt->layer_fds[i]);
+        }
+    }
+    free(rt->layer_fds);
     free(rt->entries);
     memset(rt, 0, sizeof(*rt));
 }
@@ -401,23 +433,53 @@ static bool runtime_evict_one(ds4_flashmoe_runtime_state *rt) {
     return true;
 }
 
+static bool read_fully_at(int fd, uint8_t *dst, uint64_t bytes, uint64_t offset) {
+    uint64_t done = 0;
+    while (done < bytes) {
+        ssize_t n = pread(fd,
+                          dst + done,
+                          (size_t)(bytes - done),
+                          (off_t)(offset + done));
+        if (n <= 0) return false;
+        done += (uint64_t)n;
+    }
+    return true;
+}
+
+static int runtime_layer_fd(ds4_flashmoe_runtime_state *rt,
+                            const ds4_flashmoe_layer_pack *layer_pack) {
+    if (!rt || !rt->manifest || !rt->layer_fds || !layer_pack) return -1;
+    for (size_t i = 0; i < rt->manifest->count; i++) {
+        if (&rt->manifest->layers[i] != layer_pack) continue;
+        if (rt->layer_fds[i] >= 0) return rt->layer_fds[i];
+        rt->layer_fds[i] = open(layer_pack->path, O_RDONLY);
+        return rt->layer_fds[i];
+    }
+    return -1;
+}
+
 static int runtime_load_blob(ds4_flashmoe_runtime_state *rt,
-                             const ds4_flashmoe_manifest_entry *manifest_entry,
+                             const ds4_flashmoe_layer_pack *layer_pack,
+                             uint16_t expert_id,
                              uint64_t expected_size,
                              char *err,
                              size_t errlen) {
-    if (!rt || !manifest_entry) {
-        set_err(err, errlen, "invalid runtime manifest entry");
+    if (!rt || !layer_pack) {
+        set_err(err, errlen, "invalid runtime layer pack entry");
         return 1;
     }
-    if (manifest_entry->size_bytes != expected_size) {
+    if (layer_pack->expert_size != expected_size) {
         snprintf(err,
                  errlen,
                  "FlashMoE manifest size mismatch for layer=%u expert=%u (manifest=%" PRIu64 " expected=%" PRIu64 ")",
-                 (unsigned)manifest_entry->layer_id,
-                 (unsigned)manifest_entry->expert_id,
-                 manifest_entry->size_bytes,
+                 (unsigned)layer_pack->layer_id,
+                 (unsigned)expert_id,
+                 layer_pack->expert_size,
                  expected_size);
+        return 1;
+    }
+    if (expert_id >= layer_pack->num_experts) {
+        set_err(err, errlen, "FlashMoE expert id exceeds packed layer range");
         return 1;
     }
     if (expected_size > rt->limit_bytes && rt->limit_bytes > 0) {
@@ -429,9 +491,9 @@ static int runtime_load_blob(ds4_flashmoe_runtime_state *rt,
            rt->count > 0) {
         if (!runtime_evict_one(rt)) break;
     }
-    int fd = open(manifest_entry->path, O_RDONLY);
+    int fd = runtime_layer_fd(rt, layer_pack);
     if (fd < 0) {
-        set_err(err, errlen, "failed to open FlashMoE expert blob");
+        set_err(err, errlen, "failed to open FlashMoE layer pack");
         return 1;
     }
     uint8_t *bytes = (uint8_t *)malloc((size_t)expected_size);
@@ -440,29 +502,20 @@ static int runtime_load_blob(ds4_flashmoe_runtime_state *rt,
         set_err(err, errlen, "out of memory allocating FlashMoE expert blob");
         return 1;
     }
-    size_t done = 0;
-    while (done < expected_size) {
-        ssize_t n = pread(fd,
-                          bytes + done,
-                          (size_t)(expected_size - done),
-                          (off_t)(manifest_entry->offset + done));
-        if (n <= 0) {
-            free(bytes);
-            close(fd);
-            set_err(err, errlen, "failed to read FlashMoE expert blob");
-            return 1;
-        }
-        done += (size_t)n;
+    const uint64_t base_offset = (uint64_t)expert_id * layer_pack->expert_size;
+    if (!read_fully_at(fd, bytes, expected_size, base_offset)) {
+        free(bytes);
+        set_err(err, errlen, "failed to read FlashMoE expert blob");
+        return 1;
     }
-    close(fd);
     if (!runtime_reserve_slot(rt)) {
         free(bytes);
         set_err(err, errlen, "out of memory growing FlashMoE blob cache");
         return 1;
     }
     ds4_flashmoe_blob_entry *entry = &rt->entries[rt->count++];
-    entry->layer_id = manifest_entry->layer_id;
-    entry->expert_id = manifest_entry->expert_id;
+    entry->layer_id = layer_pack->layer_id;
+    entry->expert_id = expert_id;
     entry->bytes = bytes;
     entry->size_bytes = expected_size;
     entry->last_use = ++rt->use_clock;
@@ -475,11 +528,18 @@ int ds4_flashmoe_runtime_open(const ds4_flashmoe_manifest *manifest,
                               char *err,
                               size_t errlen) {
     runtime_reset(&g_runtime);
-    if (!manifest || !manifest->entries || manifest->count == 0) {
+    if (!manifest || !manifest->layers || manifest->count == 0) {
         set_err(err, errlen, "FlashMoE runtime needs a non-empty manifest");
         return 1;
     }
     g_runtime.manifest = manifest;
+    g_runtime.layer_fds = (int *)malloc(manifest->count * sizeof(g_runtime.layer_fds[0]));
+    if (!g_runtime.layer_fds) {
+        set_err(err, errlen, "out of memory allocating FlashMoE layer fd table");
+        memset(&g_runtime, 0, sizeof(g_runtime));
+        return 1;
+    }
+    for (size_t i = 0; i < manifest->count; i++) g_runtime.layer_fds[i] = -1;
     g_runtime.limit_bytes = cache_limit_bytes;
     g_runtime.ready = true;
     return 0;
@@ -505,14 +565,15 @@ const uint8_t *ds4_flashmoe_runtime_get_blob(uint16_t layer_id,
     }
     ds4_flashmoe_blob_entry *entry = runtime_find_blob(&g_runtime, layer_id, expert_id);
     if (!entry) {
-        const ds4_flashmoe_manifest_entry *manifest_entry =
-                ds4_flashmoe_manifest_find(g_runtime.manifest, layer_id, expert_id);
-        if (!manifest_entry) {
-            set_err(err, errlen, "FlashMoE manifest entry is missing");
+        const ds4_flashmoe_layer_pack *layer_pack =
+                ds4_flashmoe_manifest_find_layer(g_runtime.manifest, layer_id);
+        if (!layer_pack) {
+            set_err(err, errlen, "FlashMoE layer pack entry is missing");
             return NULL;
         }
         if (runtime_load_blob(&g_runtime,
-                              manifest_entry,
+                              layer_pack,
+                              expert_id,
                               expected_size,
                               err,
                               errlen) != 0) {
@@ -527,4 +588,62 @@ const uint8_t *ds4_flashmoe_runtime_get_blob(uint16_t layer_id,
     entry->last_use = ++g_runtime.use_clock;
     if (actual_size) *actual_size = entry->size_bytes;
     return entry->bytes;
+}
+
+int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
+                                            const uint16_t *expert_ids,
+                                            uint32_t n_experts,
+                                            uint8_t *gate_dst,
+                                            uint8_t *up_dst,
+                                            uint8_t *down_dst,
+                                            uint64_t gate_bytes,
+                                            uint64_t up_bytes,
+                                            uint64_t down_bytes,
+                                            char *err,
+                                            size_t errlen) {
+    if (!ds4_flashmoe_runtime_ready()) {
+        set_err(err, errlen, "FlashMoE runtime cache is not ready");
+        return 1;
+    }
+    const ds4_flashmoe_layer_pack *layer_pack =
+            ds4_flashmoe_manifest_find_layer(g_runtime.manifest, layer_id);
+    if (!layer_pack) {
+        set_err(err, errlen, "FlashMoE layer pack entry is missing");
+        return 1;
+    }
+    if (layer_pack->gate_bytes != gate_bytes ||
+        layer_pack->up_bytes != up_bytes ||
+        layer_pack->down_bytes != down_bytes) {
+        set_err(err, errlen, "FlashMoE layer pack layout does not match runtime expectation");
+        return 1;
+    }
+    int fd = runtime_layer_fd(&g_runtime, layer_pack);
+    if (fd < 0) {
+        set_err(err, errlen, "failed to open FlashMoE layer pack");
+        return 1;
+    }
+    const uint64_t expert_size = layer_pack->expert_size;
+    for (uint32_t i = 0; i < n_experts; i++) {
+        if (expert_ids[i] >= layer_pack->num_experts) {
+            set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
+            return 1;
+        }
+        const uint64_t base = (uint64_t)expert_ids[i] * expert_size;
+        uint8_t *gate_ptr = gate_dst + (uint64_t)i * gate_bytes;
+        uint8_t *up_ptr = up_dst + (uint64_t)i * up_bytes;
+        uint8_t *down_ptr = down_dst + (uint64_t)i * down_bytes;
+        if (!read_fully_at(fd, gate_ptr, gate_bytes, base)) {
+            set_err(err, errlen, "failed to read FlashMoE gate slice");
+            return 1;
+        }
+        if (!read_fully_at(fd, up_ptr, up_bytes, base + gate_bytes)) {
+            set_err(err, errlen, "failed to read FlashMoE up slice");
+            return 1;
+        }
+        if (!read_fully_at(fd, down_ptr, down_bytes, base + gate_bytes + up_bytes)) {
+            set_err(err, errlen, "failed to read FlashMoE down slice");
+            return 1;
+        }
+    }
+    return 0;
 }

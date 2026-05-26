@@ -21,14 +21,21 @@ typedef struct {
 
 typedef struct {
     uint16_t layer_id;
-    uint16_t expert_id;
     char *path;
-    uint64_t offset;
-    uint64_t size_bytes;
-} ds4_flashmoe_manifest_entry;
+    uint64_t expert_size;
+    uint64_t num_experts;
+    uint64_t gate_bytes;
+    uint64_t up_bytes;
+    uint64_t down_bytes;
+    uint64_t gate_row_bytes;
+    uint64_t up_row_bytes;
+    uint64_t down_row_bytes;
+} ds4_flashmoe_layer_pack;
 
 typedef struct {
-    ds4_flashmoe_manifest_entry *entries;
+    uint32_t version;
+    uint32_t layout_version;
+    ds4_flashmoe_layer_pack *layers;
     size_t count;
     size_t layer_count;
     size_t min_entries_per_layer;
@@ -50,10 +57,9 @@ int ds4_flashmoe_manifest_validate_files(const ds4_flashmoe_manifest *manifest,
                                          char *err,
                                          size_t errlen);
 void ds4_flashmoe_manifest_free(ds4_flashmoe_manifest *manifest);
-const ds4_flashmoe_manifest_entry *ds4_flashmoe_manifest_find(
+const ds4_flashmoe_layer_pack *ds4_flashmoe_manifest_find_layer(
         const ds4_flashmoe_manifest *manifest,
-        uint16_t layer_id,
-        uint16_t expert_id);
+        uint16_t layer_id);
 int ds4_flashmoe_runtime_open(const ds4_flashmoe_manifest *manifest,
                               uint64_t cache_limit_bytes,
                               char *err,
@@ -66,5 +72,16 @@ const uint8_t *ds4_flashmoe_runtime_get_blob(uint16_t layer_id,
                                              uint64_t *actual_size,
                                              char *err,
                                              size_t errlen);
+int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
+                                            const uint16_t *expert_ids,
+                                            uint32_t n_experts,
+                                            uint8_t *gate_dst,
+                                            uint8_t *up_dst,
+                                            uint8_t *down_dst,
+                                            uint64_t gate_bytes,
+                                            uint64_t up_bytes,
+                                            uint64_t down_bytes,
+                                            char *err,
+                                            size_t errlen);
 
 #endif

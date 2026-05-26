@@ -4308,7 +4308,6 @@ static bool flashmoe_pack_selected_experts(
                                   &gate_rb,
                                   &up_rb,
                                   &down_rb);
-    const uint64_t expected_size = gate_bytes + up_bytes + down_bytes;
     int32_t local_by_global[DS4_N_EXPERT];
     uint16_t active_global[DS4_N_EXPERT];
     for (uint32_t i = 0; i < DS4_N_EXPERT; i++) local_by_global[i] = -1;
@@ -4334,26 +4333,21 @@ static bool flashmoe_pack_selected_experts(
     out_pack->up_bytes = xmalloc((size_t)active_count * up_bytes);
     out_pack->down_bytes = xmalloc((size_t)active_count * down_bytes);
     char ferr[256];
-    for (uint32_t i = 0; i < active_count; i++) {
-        uint64_t actual_size = 0;
-        const uint8_t *blob = ds4_flashmoe_runtime_get_blob((uint16_t)il,
-                                                            active_global[i],
-                                                            expected_size,
-                                                            &actual_size,
-                                                            ferr,
-                                                            sizeof(ferr));
-        if (!blob || actual_size != expected_size) {
-            fprintf(stderr,
-                    "ds4: FlashMoE backend failed to load packed blob layer=%u expert=%u: %s\n",
-                    il,
-                    active_global[i],
-                    ferr[0] ? ferr : "unexpected blob size");
-            flashmoe_selected_pack_free(out_pack);
-            return false;
-        }
-        memcpy(out_pack->gate_bytes + (uint64_t)i * gate_bytes, blob, gate_bytes);
-        memcpy(out_pack->up_bytes + (uint64_t)i * up_bytes, blob + gate_bytes, up_bytes);
-        memcpy(out_pack->down_bytes + (uint64_t)i * down_bytes, blob + gate_bytes + up_bytes, down_bytes);
+    if (ds4_flashmoe_runtime_load_selected_pack((uint16_t)il,
+                                                active_global,
+                                                active_count,
+                                                out_pack->gate_bytes,
+                                                out_pack->up_bytes,
+                                                out_pack->down_bytes,
+                                                gate_bytes,
+                                                up_bytes,
+                                                down_bytes,
+                                                ferr,
+                                                sizeof(ferr)) != 0) {
+        fprintf(stderr, "ds4: FlashMoE backend failed to load selected expert pack layer=%u: %s\n",
+                il, ferr);
+        flashmoe_selected_pack_free(out_pack);
+        return false;
     }
 
     out_pack->active_count = active_count;
@@ -18093,13 +18087,39 @@ int ds4_engine_export_flashmoe(ds4_engine *e,
                 expert_root, strerror(errno));
         return 1;
     }
+    char layout_path[PATH_MAX];
+    snprintf(layout_path, sizeof(layout_path), "%s/layout.json", expert_root);
+    FILE *layout = fopen(layout_path, "wb");
+    if (!layout) {
+        fprintf(stderr, "ds4: failed to open FlashMoE layout %s: %s\n",
+                layout_path, strerror(errno));
+        return 1;
+    }
     FILE *manifest = fopen(manifest_path, "wb");
     if (!manifest) {
         fprintf(stderr, "ds4: failed to open FlashMoE manifest %s: %s\n",
                 manifest_path, strerror(errno));
+        fclose(layout);
         return 1;
     }
-    fprintf(manifest, "{\n  \"entries\": [\n");
+    fprintf(layout,
+            "{\n"
+            "  \"version\": 2,\n"
+            "  \"layout_version\": 1,\n"
+            "  \"format\": \"flashmoe-layer-pack-v2\",\n"
+            "  \"layers\": %u,\n"
+            "  \"experts_per_layer\": %u\n"
+            "}\n",
+            DS4_N_LAYER,
+            DS4_N_EXPERT);
+    fprintf(manifest,
+            "{\n"
+            "  \"version\": 2,\n"
+            "  \"layout_version\": 1,\n"
+            "  \"format\": \"flashmoe-layer-pack-v2\",\n"
+            "  \"layout_path\": \"%s\",\n"
+            "  \"layers\": [\n",
+            layout_path);
     bool first = true;
     size_t exported = 0;
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
@@ -18110,45 +18130,63 @@ int ds4_engine_export_flashmoe(ds4_engine *e,
         if (!fp) {
             fprintf(stderr, "ds4: failed to open FlashMoE layer pack %s: %s\n",
                     layer_path, strerror(errno));
+            fclose(layout);
             fclose(manifest);
             return 1;
         }
         uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
-        flashmoe_expected_blob_layout(layer, &gate_bytes, &up_bytes, &down_bytes, NULL, NULL, NULL);
+        uint64_t gate_row_bytes = 0, up_row_bytes = 0, down_row_bytes = 0;
+        flashmoe_expected_blob_layout(layer,
+                                      &gate_bytes,
+                                      &up_bytes,
+                                      &down_bytes,
+                                      &gate_row_bytes,
+                                      &up_row_bytes,
+                                      &down_row_bytes);
         const uint64_t packed_size = gate_bytes + up_bytes + down_bytes;
         for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
             uint64_t in_dim = 0, out_dim = 0, row_bytes = 0;
             const uint8_t *gate = tensor_expert_bytes(&e->model, layer->ffn_gate_exps, expert, &in_dim, &out_dim, &row_bytes);
             const uint8_t *up = tensor_expert_bytes(&e->model, layer->ffn_up_exps, expert, &in_dim, &out_dim, &row_bytes);
             const uint8_t *down = tensor_expert_bytes(&e->model, layer->ffn_down_exps, expert, &in_dim, &out_dim, &row_bytes);
-            const uint64_t offset = (uint64_t)ftello(fp);
             if (fwrite(gate, 1, (size_t)gate_bytes, fp) != gate_bytes ||
                 fwrite(up, 1, (size_t)up_bytes, fp) != up_bytes ||
                 fwrite(down, 1, (size_t)down_bytes, fp) != down_bytes) {
                 fprintf(stderr, "ds4: failed to write FlashMoE layer pack %s\n", layer_path);
                 fclose(fp);
+                fclose(layout);
                 fclose(manifest);
                 return 1;
             }
-            fprintf(manifest,
-                    "%s    {\"layer_id\": %u, \"expert_id\": %u, \"path\": \"%s\", \"offset\": %" PRIu64 ", \"size_bytes\": %" PRIu64 "}",
-                    first ? "" : ",\n",
-                    il,
-                    expert,
-                    layer_path,
-                    offset,
-                    packed_size);
-            first = false;
             exported++;
         }
         fclose(fp);
+        fprintf(manifest,
+                "%s    {\"layer_id\": %u, \"path\": \"%s\", \"expert_size\": %" PRIu64 ", \"num_experts\": %u, "
+                "\"gate_bytes\": %" PRIu64 ", \"up_bytes\": %" PRIu64 ", \"down_bytes\": %" PRIu64 ", "
+                "\"gate_row_bytes\": %" PRIu64 ", \"up_row_bytes\": %" PRIu64 ", \"down_row_bytes\": %" PRIu64 "}",
+                first ? "" : ",\n",
+                il,
+                layer_path,
+                packed_size,
+                DS4_N_EXPERT,
+                gate_bytes,
+                up_bytes,
+                down_bytes,
+                gate_row_bytes,
+                up_row_bytes,
+                down_row_bytes);
+        first = false;
     }
     fprintf(manifest, "\n  ]\n}\n");
+    fclose(layout);
     fclose(manifest);
     fprintf(stderr,
-            "ds4: FlashMoE routed experts exported: %zu entries -> %s (root=%s)\n",
+            "ds4: FlashMoE routed experts exported: %zu experts across %u layer packs -> %s (layout=%s root=%s)\n",
             exported,
+            DS4_N_LAYER,
             manifest_path,
+            layout_path,
             expert_root);
     return 0;
 }
@@ -18211,9 +18249,9 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
             }
             e->flashmoe_manifest_ready = true;
             fprintf(stderr,
-                    "ds4: FlashMoE manifest loaded: %zu entries across %zu layers (min=%zu max=%zu per layer, cache_limit=%.2f GiB)\n",
+                    "ds4: FlashMoE manifest loaded: format=v%u layer-packs=%zu experts/layer=%zu..%zu cache_limit=%.2f GiB\n",
+                    e->flashmoe_manifest.version,
                     e->flashmoe_manifest.count,
-                    e->flashmoe_manifest.layer_count,
                     e->flashmoe_manifest.min_entries_per_layer,
                     e->flashmoe_manifest.max_entries_per_layer,
                     (double)e->flashmoe_cfg.cache_limit_bytes / (1024.0 * 1024.0 * 1024.0));
