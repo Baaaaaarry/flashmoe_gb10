@@ -4406,6 +4406,15 @@ static bool flashmoe_timing_enabled(void) {
     }
     return cache != 0;
 }
+
+static bool flashmoe_trace_enabled(void) {
+    static int cache = -1;
+    if (cache == -1) {
+        const char *env = getenv("DS4_FLASHMOE_TRACE");
+        cache = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
+    }
+    return cache != 0 || flashmoe_timing_enabled();
+}
 #endif
 
 static void layer_routed_moe_one_prealloc_flashmoe_selected(
@@ -13474,7 +13483,15 @@ static bool metal_graph_encode_layer_ffn_batch(
     DS4_METAL_PROFILE_FFN_STAGE("router");
 
     if (ok) {
-        if (ds4_flashmoe_runtime_ready()) {
+        const bool flashmoe_ready = ds4_flashmoe_runtime_ready();
+        if (flashmoe_trace_enabled()) {
+            fprintf(stderr,
+                    "ds4: routed prefill backend layer=%u mode=%s tokens=%u\n",
+                    il,
+                    flashmoe_ready ? "flashmoe" : "native",
+                    n_tokens);
+        }
+        if (flashmoe_ready) {
             g->batch_routed_mid_is_f16 = false;
             ok = metal_graph_prefill_routed_flashmoe(g, layer, il, n_tokens);
         } else {
@@ -14187,6 +14204,8 @@ static bool metal_graph_prefill_layer_major(
                     g->flashmoe_prefill_upload_s * 1000.0,
                     g->flashmoe_prefill_kernel_s * 1000.0,
                     (double)g->flashmoe_prefill_bytes / 1048576.0);
+        } else if (flashmoe_trace_enabled()) {
+            fprintf(stderr, "ds4: flashmoe prefill summary unavailable (whole graph path saw no flashmoe layers)\n");
         }
         return ok;
     }
@@ -14561,6 +14580,8 @@ static bool metal_graph_prefill_chunked_range(
                 g->flashmoe_prefill_upload_s * 1000.0,
                 g->flashmoe_prefill_kernel_s * 1000.0,
                 (double)g->flashmoe_prefill_bytes / 1048576.0);
+    } else if (flashmoe_trace_enabled()) {
+        fprintf(stderr, "ds4: flashmoe prefill summary unavailable (chunked path saw no flashmoe layers)\n");
     }
     return ok;
 }
