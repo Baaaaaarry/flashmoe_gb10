@@ -9119,6 +9119,12 @@ typedef struct {
     ds4_gpu_tensor *flashmoe_up_w;
     ds4_gpu_tensor *flashmoe_down_w;
     ds4_gpu_tensor *flashmoe_selected_gpu;
+    uint64_t flashmoe_prefill_layers;
+    uint64_t flashmoe_prefill_bytes;
+    double flashmoe_prefill_read_s;
+    double flashmoe_prefill_upload_s;
+    double flashmoe_prefill_kernel_s;
+    bool flashmoe_prefill_used;
     ds4_gpu_tensor *batch_ffn_out;
     bool materialize_ffn_out;
     ds4_gpu_tensor *directional_steering_dirs;
@@ -9226,20 +9232,20 @@ static bool metal_graph_prefill_routed_flashmoe(
                                                   n_tokens,
                                                   &g->batch_routed_mid_is_f16) != 0;
     if (timing) {
+        if (!g->flashmoe_prefill_used) {
+            fprintf(stderr, "ds4: flashmoe routed prefill active\n");
+        }
         t_kernel = now_sec() - t_kernel0;
         const double total = now_sec() - t0;
         const uint64_t bytes = (uint64_t)pack.active_count *
                                (pack.gate_expert_bytes + pack.up_expert_bytes + pack.down_expert_bytes);
-        fprintf(stderr,
-                "ds4: flashmoe prefill layer=%u tokens=%u active=%u read=%.3fms upload=%.3fms kernel=%.3fms total=%.3fms bytes=%.2f MiB\n",
-                il,
-                n_tokens,
-                pack.active_count,
-                t_read * 1000.0,
-                t_upload * 1000.0,
-                t_kernel * 1000.0,
-                total * 1000.0,
-                (double)bytes / 1048576.0);
+        g->flashmoe_prefill_used = true;
+        g->flashmoe_prefill_layers += 1u;
+        g->flashmoe_prefill_bytes += bytes;
+        g->flashmoe_prefill_read_s += t_read;
+        g->flashmoe_prefill_upload_s += t_upload;
+        g->flashmoe_prefill_kernel_s += t_kernel;
+        (void)total;
     }
 
 cleanup:
@@ -14092,6 +14098,12 @@ static bool metal_graph_prefill_layer_major(
      */
     const bool split_commands = split_profile || n_tokens > 2048 || imatrix != NULL;
     const bool profile = getenv("DS4_METAL_GRAPH_PREFILL_PROFILE") != NULL || split_profile;
+    g->flashmoe_prefill_layers = 0;
+    g->flashmoe_prefill_bytes = 0;
+    g->flashmoe_prefill_read_s = 0.0;
+    g->flashmoe_prefill_upload_s = 0.0;
+    g->flashmoe_prefill_kernel_s = 0.0;
+    g->flashmoe_prefill_used = false;
     const double t0 = profile ? now_sec() : 0.0;
     double encode_s = 0.0;
     double execute_s = 0.0;
@@ -14166,6 +14178,15 @@ static bool metal_graph_prefill_layer_major(
                     (t_done - t_encoded) * 1000.0,
                     (t_read - t_before_read) * 1000.0,
                     (t_read - t0) * 1000.0);
+        }
+        if (flashmoe_timing_enabled() && g->flashmoe_prefill_used) {
+            fprintf(stderr,
+                    "ds4: flashmoe prefill summary layers=%" PRIu64 " read=%.3fms upload=%.3fms kernel=%.3fms bytes=%.2f MiB\n",
+                    g->flashmoe_prefill_layers,
+                    g->flashmoe_prefill_read_s * 1000.0,
+                    g->flashmoe_prefill_upload_s * 1000.0,
+                    g->flashmoe_prefill_kernel_s * 1000.0,
+                    (double)g->flashmoe_prefill_bytes / 1048576.0);
         }
         return ok;
     }
@@ -14403,6 +14424,12 @@ static bool metal_graph_prefill_chunked_range(
     if (!metal_graph_warmup_prefill_kernels(g, model, weights, first_chunk)) return false;
 
     const bool profile = getenv("DS4_METAL_GRAPH_PREFILL_PROFILE") != NULL;
+    g->flashmoe_prefill_layers = 0;
+    g->flashmoe_prefill_bytes = 0;
+    g->flashmoe_prefill_read_s = 0.0;
+    g->flashmoe_prefill_upload_s = 0.0;
+    g->flashmoe_prefill_kernel_s = 0.0;
+    g->flashmoe_prefill_used = false;
     const double t0 = profile ? now_sec() : 0.0;
     double encode_s = 0.0;
     double execute_s = 0.0;
@@ -14525,6 +14552,15 @@ static bool metal_graph_prefill_chunked_range(
                 execute_s * 1000.0,
                 (t_read - t_before_read) * 1000.0,
                 (t_read - t0) * 1000.0);
+    }
+    if (flashmoe_timing_enabled() && g->flashmoe_prefill_used) {
+        fprintf(stderr,
+                "ds4: flashmoe prefill summary layers=%" PRIu64 " read=%.3fms upload=%.3fms kernel=%.3fms bytes=%.2f MiB\n",
+                g->flashmoe_prefill_layers,
+                g->flashmoe_prefill_read_s * 1000.0,
+                g->flashmoe_prefill_upload_s * 1000.0,
+                g->flashmoe_prefill_kernel_s * 1000.0,
+                (double)g->flashmoe_prefill_bytes / 1048576.0);
     }
     return ok;
 }
