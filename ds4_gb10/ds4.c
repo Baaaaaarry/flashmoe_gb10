@@ -4373,6 +4373,9 @@ static bool flashmoe_pack_selected_experts(
 static bool flashmoe_upload_selected_pack(
         const ds4_flashmoe_selected_pack *pack,
         uint32_t                          n_pairs,
+        ds4_gpu_tensor                   *gate_reuse,
+        ds4_gpu_tensor                   *up_reuse,
+        ds4_gpu_tensor                   *down_reuse,
         ds4_gpu_tensor                   *selected_reuse,
         ds4_gpu_tensor                  **gate_w,
         ds4_gpu_tensor                  **up_w,
@@ -4384,18 +4387,33 @@ static bool flashmoe_upload_selected_pack(
     *selected_gpu = NULL;
     if (!pack || pack->active_count == 0 || n_pairs == 0) return false;
 
-    *gate_w = ds4_gpu_tensor_alloc((uint64_t)pack->active_count * pack->gate_expert_bytes);
-    *up_w = ds4_gpu_tensor_alloc((uint64_t)pack->active_count * pack->up_expert_bytes);
-    *down_w = ds4_gpu_tensor_alloc((uint64_t)pack->active_count * pack->down_expert_bytes);
+    const uint64_t gate_bytes = (uint64_t)pack->active_count * pack->gate_expert_bytes;
+    const uint64_t up_bytes = (uint64_t)pack->active_count * pack->up_expert_bytes;
+    const uint64_t down_bytes = (uint64_t)pack->active_count * pack->down_expert_bytes;
+    if (gate_reuse) {
+        *gate_w = ds4_gpu_tensor_view(gate_reuse, 0, gate_bytes);
+    } else {
+        *gate_w = ds4_gpu_tensor_alloc(gate_bytes);
+    }
+    if (up_reuse) {
+        *up_w = ds4_gpu_tensor_view(up_reuse, 0, up_bytes);
+    } else {
+        *up_w = ds4_gpu_tensor_alloc(up_bytes);
+    }
+    if (down_reuse) {
+        *down_w = ds4_gpu_tensor_view(down_reuse, 0, down_bytes);
+    } else {
+        *down_w = ds4_gpu_tensor_alloc(down_bytes);
+    }
     *selected_gpu = selected_reuse ? selected_reuse
                                    : ds4_gpu_tensor_alloc((uint64_t)n_pairs * sizeof(pack->selected_local[0]));
     if (!*gate_w || !*up_w || !*down_w || !*selected_gpu) return false;
     return ds4_gpu_tensor_write(*gate_w, 0, pack->gate_bytes,
-                                (uint64_t)pack->active_count * pack->gate_expert_bytes) != 0 &&
+                                gate_bytes) != 0 &&
            ds4_gpu_tensor_write(*up_w, 0, pack->up_bytes,
-                                (uint64_t)pack->active_count * pack->up_expert_bytes) != 0 &&
+                                up_bytes) != 0 &&
            ds4_gpu_tensor_write(*down_w, 0, pack->down_bytes,
-                                (uint64_t)pack->active_count * pack->down_expert_bytes) != 0 &&
+                                down_bytes) != 0 &&
            ds4_gpu_tensor_write(*selected_gpu, 0, pack->selected_local,
                                 (uint64_t)n_pairs * sizeof(pack->selected_local[0])) != 0;
 }
@@ -9130,6 +9148,9 @@ typedef struct {
     ds4_gpu_tensor *flashmoe_up_w;
     ds4_gpu_tensor *flashmoe_down_w;
     ds4_gpu_tensor *flashmoe_selected_gpu;
+    uint64_t flashmoe_gate_w_bytes;
+    uint64_t flashmoe_up_w_bytes;
+    uint64_t flashmoe_down_w_bytes;
     uint64_t flashmoe_prefill_layers;
     uint64_t flashmoe_prefill_bytes;
     double flashmoe_prefill_read_s;
@@ -9158,7 +9179,16 @@ static bool metal_graph_decode_routed_flashmoe(
 
     if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
     if (!flashmoe_pack_selected_experts(layer, il, selected, DS4_N_EXPERT_USED, &pack)) goto cleanup;
-    if (!flashmoe_upload_selected_pack(&pack, DS4_N_EXPERT_USED, g->flashmoe_selected_gpu, &gate_w, &up_w, &down_w, &selected_gpu)) goto cleanup;
+    if (!flashmoe_upload_selected_pack(&pack,
+                                       DS4_N_EXPERT_USED,
+                                       g->flashmoe_gate_w,
+                                       g->flashmoe_up_w,
+                                       g->flashmoe_down_w,
+                                       g->flashmoe_selected_gpu,
+                                       &gate_w,
+                                       &up_w,
+                                       &down_w,
+                                       &selected_gpu)) goto cleanup;
     ok = ds4_gpu_routed_moe_one_external_tensor(g->routed_out,
                                                 g->routed_gate,
                                                 g->routed_up,
@@ -9185,9 +9215,9 @@ static bool metal_graph_decode_routed_flashmoe(
 
 cleanup:
     if (selected_gpu != g->flashmoe_selected_gpu) ds4_gpu_tensor_free(selected_gpu);
-    ds4_gpu_tensor_free(down_w);
-    ds4_gpu_tensor_free(up_w);
-    ds4_gpu_tensor_free(gate_w);
+    if (down_w != g->flashmoe_down_w) ds4_gpu_tensor_free(down_w);
+    if (up_w != g->flashmoe_up_w) ds4_gpu_tensor_free(up_w);
+    if (gate_w != g->flashmoe_gate_w) ds4_gpu_tensor_free(gate_w);
     flashmoe_selected_pack_free(&pack);
     return ok;
 }
@@ -9213,7 +9243,16 @@ static bool metal_graph_prefill_routed_flashmoe(
     if (!flashmoe_pack_selected_experts(layer, il, selected, (uint32_t)selected_elems, &pack)) goto cleanup;
     if (timing) t_read = now_sec() - t_read0;
     const double t_upload0 = timing ? now_sec() : 0.0;
-    if (!flashmoe_upload_selected_pack(&pack, (uint32_t)selected_elems, g->flashmoe_selected_gpu, &gate_w, &up_w, &down_w, &selected_gpu)) goto cleanup;
+    if (!flashmoe_upload_selected_pack(&pack,
+                                       (uint32_t)selected_elems,
+                                       g->flashmoe_gate_w,
+                                       g->flashmoe_up_w,
+                                       g->flashmoe_down_w,
+                                       g->flashmoe_selected_gpu,
+                                       &gate_w,
+                                       &up_w,
+                                       &down_w,
+                                       &selected_gpu)) goto cleanup;
     if (timing) t_upload = now_sec() - t_upload0;
     g->batch_routed_mid_is_f16 = false;
     const double t_kernel0 = timing ? now_sec() : 0.0;
@@ -9261,9 +9300,9 @@ static bool metal_graph_prefill_routed_flashmoe(
 
 cleanup:
     if (selected_gpu != g->flashmoe_selected_gpu) ds4_gpu_tensor_free(selected_gpu);
-    ds4_gpu_tensor_free(down_w);
-    ds4_gpu_tensor_free(up_w);
-    ds4_gpu_tensor_free(gate_w);
+    if (down_w != g->flashmoe_down_w) ds4_gpu_tensor_free(down_w);
+    if (up_w != g->flashmoe_up_w) ds4_gpu_tensor_free(up_w);
+    if (gate_w != g->flashmoe_gate_w) ds4_gpu_tensor_free(gate_w);
     flashmoe_selected_pack_free(&pack);
     free(selected);
     return ok;
@@ -9287,6 +9326,9 @@ static void metal_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->batch_shared_mid);
     ds4_gpu_tensor_free(g->batch_shared_up);
     ds4_gpu_tensor_free(g->batch_shared_gate);
+    ds4_gpu_tensor_free(g->flashmoe_down_w);
+    ds4_gpu_tensor_free(g->flashmoe_up_w);
+    ds4_gpu_tensor_free(g->flashmoe_gate_w);
     ds4_gpu_tensor_free(g->batch_ffn_norm);
     ds4_gpu_tensor_free(g->batch_ffn_cur);
     ds4_gpu_tensor_free(g->flashmoe_selected_gpu);
@@ -9664,6 +9706,27 @@ static bool metal_graph_alloc_raw_cap(
         : DS4_N_INDEXER_HEAD_DIM);
     const uint64_t indexer_q_dim = (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM;
     const uint64_t pc = prefill_cap;
+    uint64_t flashmoe_gate_bytes_max = 0;
+    uint64_t flashmoe_up_bytes_max = 0;
+    uint64_t flashmoe_down_bytes_max = 0;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const ds4_layer_weights *l = &weights->layer[il];
+        const uint64_t gate_rb = routed_expert_row_bytes(l->ffn_gate_exps);
+        const uint64_t up_rb = routed_expert_row_bytes(l->ffn_up_exps);
+        const uint64_t down_rb = routed_expert_row_bytes(l->ffn_down_exps);
+        const uint64_t gate_exp_bytes = gate_rb * l->ffn_gate_exps->dim[1];
+        const uint64_t up_exp_bytes = up_rb * l->ffn_up_exps->dim[1];
+        const uint64_t down_exp_bytes = down_rb * l->ffn_down_exps->dim[1];
+        if ((uint64_t)DS4_N_EXPERT * gate_exp_bytes > flashmoe_gate_bytes_max) {
+            flashmoe_gate_bytes_max = (uint64_t)DS4_N_EXPERT * gate_exp_bytes;
+        }
+        if ((uint64_t)DS4_N_EXPERT * up_exp_bytes > flashmoe_up_bytes_max) {
+            flashmoe_up_bytes_max = (uint64_t)DS4_N_EXPERT * up_exp_bytes;
+        }
+        if ((uint64_t)DS4_N_EXPERT * down_exp_bytes > flashmoe_down_bytes_max) {
+            flashmoe_down_bytes_max = (uint64_t)DS4_N_EXPERT * down_exp_bytes;
+        }
+    }
 
     g->cur_hc = ds4_gpu_tensor_alloc(hc_dim * sizeof(float));
     g->flat_hc = ds4_gpu_tensor_alloc(hc_dim * sizeof(float));
@@ -9819,6 +9882,12 @@ static bool metal_graph_alloc_raw_cap(
     g->batch_router_probs = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
     g->batch_router_selected = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int));
     g->batch_router_weights = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(float));
+    g->flashmoe_gate_w = ds4_gpu_tensor_alloc(flashmoe_gate_bytes_max);
+    g->flashmoe_up_w = ds4_gpu_tensor_alloc(flashmoe_up_bytes_max);
+    g->flashmoe_down_w = ds4_gpu_tensor_alloc(flashmoe_down_bytes_max);
+    g->flashmoe_gate_w_bytes = flashmoe_gate_bytes_max;
+    g->flashmoe_up_w_bytes = flashmoe_up_bytes_max;
+    g->flashmoe_down_w_bytes = flashmoe_down_bytes_max;
     g->flashmoe_selected_gpu = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int32_t));
     g->batch_routed_gate = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
     g->batch_routed_up = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
@@ -9890,6 +9959,7 @@ static bool metal_graph_alloc_raw_cap(
                     g->batch_shared_mid && g->batch_shared_out &&
                     g->batch_router_logits && g->batch_router_probs &&
                     g->batch_router_selected && g->batch_router_weights &&
+                    g->flashmoe_gate_w && g->flashmoe_up_w && g->flashmoe_down_w &&
                     g->flashmoe_selected_gpu &&
                     g->batch_routed_gate && g->batch_routed_up &&
                     g->batch_routed_mid && g->batch_routed_down &&
