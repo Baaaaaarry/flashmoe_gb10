@@ -9223,6 +9223,11 @@ typedef struct ds4_gpu_graph {
     double flashmoe_prefill_upload_s;
     double flashmoe_prefill_kernel_s;
     bool flashmoe_prefill_used;
+    uint64_t flashmoe_decode_layers;
+    uint64_t flashmoe_decode_hits;
+    uint64_t flashmoe_decode_misses;
+    double flashmoe_decode_upload_s;
+    bool flashmoe_decode_used;
     ds4_gpu_tensor *batch_ffn_out;
     bool materialize_ffn_out;
     ds4_gpu_tensor *directional_steering_dirs;
@@ -9256,6 +9261,10 @@ static bool metal_graph_decode_routed_flashmoe(
                                         g->flashmoe_selected_local_host,
                                         active_global,
                                         &active_count)) goto cleanup;
+    if (flashmoe_timing_enabled()) {
+        g->flashmoe_decode_used = true;
+        g->flashmoe_decode_layers += 1u;
+    }
     if (flashmoe_decode_gpu_cache_enabled()) {
         int hit_way = -1;
         for (uint32_t way = 0; way < DS4_FLASHMOE_DECODE_CACHE_WAYS; way++) {
@@ -9274,6 +9283,7 @@ static bool metal_graph_decode_routed_flashmoe(
             }
         }
         if (hit_way >= 0) {
+            if (flashmoe_timing_enabled()) g->flashmoe_decode_hits += 1u;
             gate_w = g->flashmoe_decode_gate_w[il][hit_way];
             up_w = g->flashmoe_decode_up_w[il][hit_way];
             down_w = g->flashmoe_decode_down_w[il][hit_way];
@@ -9288,6 +9298,8 @@ static bool metal_graph_decode_routed_flashmoe(
                                      g->flashmoe_selected_local_host,
                                      (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t)) == 0) goto cleanup;
         } else {
+            const double t_upload0 = ds4_now_seconds();
+            if (flashmoe_timing_enabled()) g->flashmoe_decode_misses += 1u;
             const uint32_t way = g->flashmoe_decode_next_way[il] % DS4_FLASHMOE_DECODE_CACHE_WAYS;
             ds4_gpu_tensor *gate_reuse = g->flashmoe_decode_gate_w[il][way];
             ds4_gpu_tensor *up_reuse = g->flashmoe_decode_up_w[il][way];
@@ -9323,6 +9335,9 @@ static bool metal_graph_decode_routed_flashmoe(
             }
             g->flashmoe_decode_valid[il][way] = 1u;
             g->flashmoe_decode_next_way[il] = (uint8_t)((way + 1u) % DS4_FLASHMOE_DECODE_CACHE_WAYS);
+            if (flashmoe_timing_enabled()) {
+                g->flashmoe_decode_upload_s += ds4_now_seconds() - t_upload0;
+            }
         }
     } else {
         ds4_gpu_tensor *gate_reuse = g->flashmoe_gate_w;
@@ -14427,6 +14442,16 @@ static bool metal_graph_prefill_layer_major(
     g->flashmoe_prefill_upload_s = 0.0;
     g->flashmoe_prefill_kernel_s = 0.0;
     g->flashmoe_prefill_used = false;
+    g->flashmoe_decode_layers = 0;
+    g->flashmoe_decode_hits = 0;
+    g->flashmoe_decode_misses = 0;
+    g->flashmoe_decode_upload_s = 0.0;
+    g->flashmoe_decode_used = false;
+    g->flashmoe_decode_layers = 0;
+    g->flashmoe_decode_hits = 0;
+    g->flashmoe_decode_misses = 0;
+    g->flashmoe_decode_upload_s = 0.0;
+    g->flashmoe_decode_used = false;
     const double t0 = profile ? now_sec() : 0.0;
     double encode_s = 0.0;
     double execute_s = 0.0;
@@ -14510,6 +14535,14 @@ static bool metal_graph_prefill_layer_major(
                     g->flashmoe_prefill_upload_s * 1000.0,
                     g->flashmoe_prefill_kernel_s * 1000.0,
                     (double)g->flashmoe_prefill_bytes / 1048576.0);
+        }
+        if (flashmoe_timing_enabled() && g->flashmoe_decode_used) {
+            fprintf(stderr,
+                    "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " miss_upload=%.3fms\n",
+                    g->flashmoe_decode_layers,
+                    g->flashmoe_decode_hits,
+                    g->flashmoe_decode_misses,
+                    g->flashmoe_decode_upload_s * 1000.0);
         }
         return ok;
     }
@@ -14884,6 +14917,14 @@ static bool metal_graph_prefill_chunked_range(
                 g->flashmoe_prefill_upload_s * 1000.0,
                 g->flashmoe_prefill_kernel_s * 1000.0,
                 (double)g->flashmoe_prefill_bytes / 1048576.0);
+    }
+    if (flashmoe_timing_enabled() && g->flashmoe_decode_used) {
+        fprintf(stderr,
+                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " miss_upload=%.3fms\n",
+                g->flashmoe_decode_layers,
+                g->flashmoe_decode_hits,
+                g->flashmoe_decode_misses,
+                g->flashmoe_decode_upload_s * 1000.0);
     }
     return ok;
 }
