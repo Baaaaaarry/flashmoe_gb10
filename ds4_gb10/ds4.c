@@ -4344,6 +4344,7 @@ static bool flashmoe_pack_selected_experts(
     if (ds4_flashmoe_runtime_load_selected_pack((uint16_t)il,
                                                 active_global,
                                                 active_count,
+                                                n_pairs <= DS4_N_EXPERT_USED,
                                                 out_pack->gate_bytes,
                                                 out_pack->up_bytes,
                                                 out_pack->down_bytes,

@@ -593,6 +593,7 @@ const uint8_t *ds4_flashmoe_runtime_get_blob(uint16_t layer_id,
 int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
                                             const uint16_t *expert_ids,
                                             uint32_t n_experts,
+                                            bool prefer_cache,
                                             uint8_t *gate_dst,
                                             uint8_t *up_dst,
                                             uint8_t *down_dst,
@@ -618,30 +619,56 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
         return 1;
     }
     const uint64_t expert_size = layer_pack->expert_size;
+    int fd = -1;
+    uint8_t *scratch = NULL;
+    if (!prefer_cache) {
+        fd = runtime_layer_fd(&g_runtime, layer_pack);
+        if (fd < 0) {
+            set_err(err, errlen, "failed to open FlashMoE layer pack");
+            return 1;
+        }
+        scratch = (uint8_t *)malloc((size_t)expert_size);
+        if (!scratch) {
+            set_err(err, errlen, "out of memory allocating FlashMoE direct read buffer");
+            return 1;
+        }
+    }
     for (uint32_t i = 0; i < n_experts; i++) {
         if (expert_ids[i] >= layer_pack->num_experts) {
+            free(scratch);
             set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
             return 1;
         }
-        ds4_flashmoe_blob_entry *entry =
-                runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
-        if (!entry) {
-            if (runtime_load_blob(&g_runtime,
-                                  layer_pack,
-                                  expert_ids[i],
-                                  expert_size,
-                                  err,
-                                  errlen) != 0) {
+        const uint8_t *blob = NULL;
+        if (prefer_cache) {
+            ds4_flashmoe_blob_entry *entry =
+                    runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
+            if (!entry) {
+                if (runtime_load_blob(&g_runtime,
+                                      layer_pack,
+                                      expert_ids[i],
+                                      expert_size,
+                                      err,
+                                      errlen) != 0) {
+                    return 1;
+                }
+                entry = runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
+            }
+            if (!entry || entry->size_bytes != expert_size || !entry->bytes) {
+                set_err(err, errlen, "FlashMoE blob cache load failed");
                 return 1;
             }
-            entry = runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
+            entry->last_use = ++g_runtime.use_clock;
+            blob = entry->bytes;
+        } else {
+            const uint64_t base = (uint64_t)expert_ids[i] * expert_size;
+            if (!read_fully_at(fd, scratch, expert_size, base)) {
+                free(scratch);
+                set_err(err, errlen, "failed to read FlashMoE expert blob");
+                return 1;
+            }
+            blob = scratch;
         }
-        if (!entry || entry->size_bytes != expert_size || !entry->bytes) {
-            set_err(err, errlen, "FlashMoE blob cache load failed");
-            return 1;
-        }
-        entry->last_use = ++g_runtime.use_clock;
-        const uint8_t *blob = entry->bytes;
         uint8_t *gate_ptr = gate_dst + (uint64_t)i * gate_bytes;
         uint8_t *up_ptr = up_dst + (uint64_t)i * up_bytes;
         uint8_t *down_ptr = down_dst + (uint64_t)i * down_bytes;
@@ -649,5 +676,6 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
         memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
         memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
     }
+    free(scratch);
     return 0;
 }
