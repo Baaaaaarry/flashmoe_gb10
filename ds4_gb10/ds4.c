@@ -4483,6 +4483,8 @@ static bool __attribute__((unused)) flashmoe_write_slot_tensor(ds4_gpu_tensor *b
     ds4_gpu_tensor_free(view);
     return ok;
 }
+
+static double ds4_now_seconds(void);
 #endif
 
 static void layer_routed_moe_one_prealloc_flashmoe_selected(
