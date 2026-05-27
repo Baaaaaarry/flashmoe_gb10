@@ -64,6 +64,7 @@
 
 static uint64_t layer_attn_state_bytes(uint32_t ratio);
 static uint64_t layer_index_state_bytes(uint32_t ratio);
+static bool ds4_engine_prepare_flashmoe_runtime(ds4_engine *e, const char *context);
 
 static const char DS4_REASONING_EFFORT_MAX_PREFIX[] =
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
