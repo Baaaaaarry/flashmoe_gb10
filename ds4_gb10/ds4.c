@@ -4280,14 +4280,17 @@ typedef struct {
     uint8_t *gate_bytes;
     uint8_t *up_bytes;
     uint8_t *down_bytes;
+    bool owns_storage;
 } ds4_flashmoe_selected_pack;
 
 static void flashmoe_selected_pack_free(ds4_flashmoe_selected_pack *pack) {
     if (!pack) return;
-    free(pack->down_bytes);
-    free(pack->up_bytes);
-    free(pack->gate_bytes);
-    free(pack->selected_local);
+    if (pack->owns_storage) {
+        free(pack->down_bytes);
+        free(pack->up_bytes);
+        free(pack->gate_bytes);
+        free(pack->selected_local);
+    }
     memset(pack, 0, sizeof(*pack));
 }
 
@@ -4296,6 +4299,10 @@ static bool flashmoe_pack_selected_experts(
         uint32_t                      il,
         const int                    *selected,
         uint32_t                      n_pairs,
+        int32_t                      *selected_local_reuse,
+        uint8_t                      *gate_reuse,
+        uint8_t                      *up_reuse,
+        uint8_t                      *down_reuse,
         ds4_flashmoe_selected_pack   *out_pack) {
     if (!layer || !selected || !out_pack || n_pairs == 0) return false;
     memset(out_pack, 0, sizeof(*out_pack));
@@ -4332,14 +4339,26 @@ static bool flashmoe_pack_selected_experts(
         local_by_global[expert] = (int32_t)active_count;
         active_global[active_count++] = (uint16_t)expert;
     }
-    out_pack->selected_local = xmalloc((size_t)n_pairs * sizeof(out_pack->selected_local[0]));
+    out_pack->owns_storage = (selected_local_reuse == NULL ||
+                              gate_reuse == NULL ||
+                              up_reuse == NULL ||
+                              down_reuse == NULL);
+    out_pack->selected_local = selected_local_reuse
+        ? selected_local_reuse
+        : xmalloc((size_t)n_pairs * sizeof(out_pack->selected_local[0]));
     for (uint32_t i = 0; i < n_pairs; i++) {
         out_pack->selected_local[i] = local_by_global[selected[i]];
     }
 
-    out_pack->gate_bytes = xmalloc((size_t)active_count * gate_bytes);
-    out_pack->up_bytes = xmalloc((size_t)active_count * up_bytes);
-    out_pack->down_bytes = xmalloc((size_t)active_count * down_bytes);
+    out_pack->gate_bytes = gate_reuse
+        ? gate_reuse
+        : xmalloc((size_t)active_count * gate_bytes);
+    out_pack->up_bytes = up_reuse
+        ? up_reuse
+        : xmalloc((size_t)active_count * up_bytes);
+    out_pack->down_bytes = down_reuse
+        ? down_reuse
+        : xmalloc((size_t)active_count * down_bytes);
     char ferr[256];
     if (ds4_flashmoe_runtime_load_selected_pack((uint16_t)il,
                                                 active_global,
@@ -4425,15 +4444,6 @@ static bool flashmoe_timing_enabled(void) {
         cache = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
     }
     return cache != 0;
-}
-
-static bool flashmoe_trace_enabled(void) {
-    static int cache = -1;
-    if (cache == -1) {
-        const char *env = getenv("DS4_FLASHMOE_TRACE");
-        cache = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
-    }
-    return cache != 0 || flashmoe_timing_enabled();
 }
 #endif
 
@@ -9151,6 +9161,16 @@ typedef struct {
     uint64_t flashmoe_gate_w_bytes;
     uint64_t flashmoe_up_w_bytes;
     uint64_t flashmoe_down_w_bytes;
+    int *flashmoe_selected_host;
+    int32_t *flashmoe_selected_local_host;
+    uint8_t *flashmoe_gate_host;
+    uint8_t *flashmoe_up_host;
+    uint8_t *flashmoe_down_host;
+    uint64_t flashmoe_selected_host_cap;
+    uint64_t flashmoe_selected_local_cap;
+    uint64_t flashmoe_gate_host_bytes;
+    uint64_t flashmoe_up_host_bytes;
+    uint64_t flashmoe_down_host_bytes;
     uint64_t flashmoe_prefill_layers;
     uint64_t flashmoe_prefill_bytes;
     double flashmoe_prefill_read_s;
@@ -9178,7 +9198,15 @@ static bool metal_graph_decode_routed_flashmoe(
     memset(&pack, 0, sizeof(pack));
 
     if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
-    if (!flashmoe_pack_selected_experts(layer, il, selected, DS4_N_EXPERT_USED, &pack)) goto cleanup;
+    if (!flashmoe_pack_selected_experts(layer,
+                                        il,
+                                        selected,
+                                        DS4_N_EXPERT_USED,
+                                        g->flashmoe_selected_local_host,
+                                        g->flashmoe_gate_host,
+                                        g->flashmoe_up_host,
+                                        g->flashmoe_down_host,
+                                        &pack)) goto cleanup;
     if (!flashmoe_upload_selected_pack(&pack,
                                        DS4_N_EXPERT_USED,
                                        g->flashmoe_gate_w,
@@ -9228,7 +9256,7 @@ static bool metal_graph_prefill_routed_flashmoe(
         uint32_t                il,
         uint32_t                n_tokens) {
     const uint64_t selected_elems = (uint64_t)n_tokens * DS4_N_EXPERT_USED;
-    int *selected = xmalloc(selected_elems * sizeof(selected[0]));
+    int *selected = g->flashmoe_selected_host;
     ds4_flashmoe_selected_pack pack;
     ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL, *selected_gpu = NULL;
     bool ok = false;
@@ -9240,7 +9268,15 @@ static bool metal_graph_prefill_routed_flashmoe(
     if (!selected) goto cleanup;
     if (ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, selected_elems * sizeof(int)) == 0) goto cleanup;
     const double t_read0 = timing ? now_sec() : 0.0;
-    if (!flashmoe_pack_selected_experts(layer, il, selected, (uint32_t)selected_elems, &pack)) goto cleanup;
+    if (!flashmoe_pack_selected_experts(layer,
+                                        il,
+                                        selected,
+                                        (uint32_t)selected_elems,
+                                        g->flashmoe_selected_local_host,
+                                        g->flashmoe_gate_host,
+                                        g->flashmoe_up_host,
+                                        g->flashmoe_down_host,
+                                        &pack)) goto cleanup;
     if (timing) t_read = now_sec() - t_read0;
     const double t_upload0 = timing ? now_sec() : 0.0;
     if (!flashmoe_upload_selected_pack(&pack,
@@ -9282,9 +9318,6 @@ static bool metal_graph_prefill_routed_flashmoe(
                                                   n_tokens,
                                                   &g->batch_routed_mid_is_f16) != 0;
     if (timing) {
-        if (!g->flashmoe_prefill_used) {
-            fprintf(stderr, "ds4: flashmoe routed prefill active\n");
-        }
         t_kernel = now_sec() - t_kernel0;
         const double total = now_sec() - t0;
         const uint64_t bytes = (uint64_t)pack.active_count *
@@ -9304,13 +9337,17 @@ cleanup:
     if (up_w != g->flashmoe_up_w) ds4_gpu_tensor_free(up_w);
     if (gate_w != g->flashmoe_gate_w) ds4_gpu_tensor_free(gate_w);
     flashmoe_selected_pack_free(&pack);
-    free(selected);
     return ok;
 }
 #endif
 
 /* Release every Metal tensor owned by the whole-model graph runtime. */
 static void metal_graph_free(ds4_gpu_graph *g) {
+    free(g->flashmoe_down_host);
+    free(g->flashmoe_up_host);
+    free(g->flashmoe_gate_host);
+    free(g->flashmoe_selected_local_host);
+    free(g->flashmoe_selected_host);
     ds4_gpu_tensor_free(g->directional_steering_dirs);
     ds4_gpu_tensor_free(g->batch_ffn_out);
     ds4_gpu_tensor_free(g->batch_routed_out);
@@ -9706,6 +9743,7 @@ static bool metal_graph_alloc_raw_cap(
         : DS4_N_INDEXER_HEAD_DIM);
     const uint64_t indexer_q_dim = (uint64_t)DS4_N_INDEXER_HEAD * DS4_N_INDEXER_HEAD_DIM;
     const uint64_t pc = prefill_cap;
+    const uint64_t flashmoe_selected_pairs_cap = pc * DS4_N_EXPERT_USED;
     uint64_t flashmoe_gate_bytes_max = 0;
     uint64_t flashmoe_up_bytes_max = 0;
     uint64_t flashmoe_down_bytes_max = 0;
@@ -9888,6 +9926,16 @@ static bool metal_graph_alloc_raw_cap(
     g->flashmoe_gate_w_bytes = flashmoe_gate_bytes_max;
     g->flashmoe_up_w_bytes = flashmoe_up_bytes_max;
     g->flashmoe_down_w_bytes = flashmoe_down_bytes_max;
+    g->flashmoe_selected_host = xmalloc((size_t)flashmoe_selected_pairs_cap * sizeof(g->flashmoe_selected_host[0]));
+    g->flashmoe_selected_local_host = xmalloc((size_t)flashmoe_selected_pairs_cap * sizeof(g->flashmoe_selected_local_host[0]));
+    g->flashmoe_gate_host = xmalloc((size_t)flashmoe_gate_bytes_max);
+    g->flashmoe_up_host = xmalloc((size_t)flashmoe_up_bytes_max);
+    g->flashmoe_down_host = xmalloc((size_t)flashmoe_down_bytes_max);
+    g->flashmoe_selected_host_cap = flashmoe_selected_pairs_cap;
+    g->flashmoe_selected_local_cap = flashmoe_selected_pairs_cap;
+    g->flashmoe_gate_host_bytes = flashmoe_gate_bytes_max;
+    g->flashmoe_up_host_bytes = flashmoe_up_bytes_max;
+    g->flashmoe_down_host_bytes = flashmoe_down_bytes_max;
     g->flashmoe_selected_gpu = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int32_t));
     g->batch_routed_gate = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
     g->batch_routed_up = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * routed_mid_dim * sizeof(float));
@@ -9960,6 +10008,8 @@ static bool metal_graph_alloc_raw_cap(
                     g->batch_router_logits && g->batch_router_probs &&
                     g->batch_router_selected && g->batch_router_weights &&
                     g->flashmoe_gate_w && g->flashmoe_up_w && g->flashmoe_down_w &&
+                    g->flashmoe_selected_host && g->flashmoe_selected_local_host &&
+                    g->flashmoe_gate_host && g->flashmoe_up_host && g->flashmoe_down_host &&
                     g->flashmoe_selected_gpu &&
                     g->batch_routed_gate && g->batch_routed_up &&
                     g->batch_routed_mid && g->batch_routed_down &&
@@ -13556,13 +13606,6 @@ static bool metal_graph_encode_layer_ffn_batch(
 
     if (ok) {
         const bool flashmoe_ready = ds4_flashmoe_runtime_ready();
-        if (flashmoe_trace_enabled()) {
-            fprintf(stderr,
-                    "ds4: routed prefill backend layer=%u mode=%s tokens=%u\n",
-                    il,
-                    flashmoe_ready ? "flashmoe" : "native",
-                    n_tokens);
-        }
         if (flashmoe_ready) {
             g->batch_routed_mid_is_f16 = false;
             ok = metal_graph_prefill_routed_flashmoe(g, layer, il, n_tokens);
@@ -14276,8 +14319,6 @@ static bool metal_graph_prefill_layer_major(
                     g->flashmoe_prefill_upload_s * 1000.0,
                     g->flashmoe_prefill_kernel_s * 1000.0,
                     (double)g->flashmoe_prefill_bytes / 1048576.0);
-        } else if (flashmoe_trace_enabled()) {
-            fprintf(stderr, "ds4: flashmoe prefill summary unavailable (whole graph path saw no flashmoe layers)\n");
         }
         return ok;
     }
@@ -14652,8 +14693,6 @@ static bool metal_graph_prefill_chunked_range(
                 g->flashmoe_prefill_upload_s * 1000.0,
                 g->flashmoe_prefill_kernel_s * 1000.0,
                 (double)g->flashmoe_prefill_bytes / 1048576.0);
-    } else if (flashmoe_trace_enabled()) {
-        fprintf(stderr, "ds4: flashmoe prefill summary unavailable (chunked path saw no flashmoe layers)\n");
     }
     return ok;
 }
@@ -18952,19 +18991,6 @@ static bool ds4_engine_prepare_flashmoe_runtime(ds4_engine *e, const char *conte
                 context ? context : "",
                 ferr);
         return false;
-    }
-    const char *trace = getenv("DS4_FLASHMOE_TRACE");
-    const char *timing = getenv("DS4_FLASHMOE_TIMING");
-    const bool trace_enabled =
-        (trace && trace[0] && strcmp(trace, "0") != 0) ||
-        (timing && timing[0] && strcmp(timing, "0") != 0);
-    if (trace_enabled) {
-        fprintf(stderr,
-                "ds4: FlashMoE runtime ready%s%s (layers=%zu, cache_limit=%.2f GiB)\n",
-                context ? " for " : "",
-                context ? context : "",
-                e->flashmoe_manifest.count,
-                (double)e->flashmoe_cfg.cache_limit_bytes / (1024.0 * 1024.0 * 1024.0));
     }
     return true;
 }
