@@ -16838,6 +16838,14 @@ static int generate_metal_graph_raw_swa(
             "ds4: prefill: %.2f t/s, generation: %.2f t/s\n",
             prefill_s > 0.0 ? (double)prompt->len / prefill_s : 0.0,
             decode_s > 0.0 ? (double)n_generated / decode_s : 0.0);
+    if (flashmoe_timing_enabled() && g.flashmoe_decode_used) {
+        fprintf(stderr,
+                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " miss_upload=%.3fms\n",
+                g.flashmoe_decode_layers,
+                g.flashmoe_decode_hits,
+                g.flashmoe_decode_misses,
+                g.flashmoe_decode_upload_s * 1000.0);
+    }
 
     if (memory_report) ds4_gpu_print_memory_report("before graph free");
     free(logits);
