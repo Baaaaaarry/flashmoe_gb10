@@ -17973,6 +17973,9 @@ int ds4_engine_generate_argmax(
                     ds4_backend_name(e->backend));
             return 1;
         }
+        if (!ds4_engine_prepare_flashmoe_runtime(e, "argmax generation")) {
+            return 1;
+        }
         return generate_metal_graph_raw_swa(model, vocab, weights, prompt,
                                             n_predict, ctx_size, e->quality,
                                             e->directional_steering_file,
@@ -18863,17 +18866,41 @@ void ds4_engine_close(ds4_engine *e) {
     free(e);
 }
 
+static bool ds4_engine_prepare_flashmoe_runtime(ds4_engine *e, const char *context) {
+    if (!e || !e->flashmoe_manifest_ready) return true;
+    if (ds4_flashmoe_runtime_ready()) return true;
+    char ferr[256];
+    if (ds4_flashmoe_runtime_open(&e->flashmoe_manifest,
+                                  e->flashmoe_cfg.cache_limit_bytes,
+                                  ferr,
+                                  sizeof(ferr)) != 0) {
+        fprintf(stderr,
+                "ds4: failed to initialize FlashMoE runtime cache%s%s: %s\n",
+                context ? " for " : "",
+                context ? context : "",
+                ferr);
+        return false;
+    }
+    const char *trace = getenv("DS4_FLASHMOE_TRACE");
+    const char *timing = getenv("DS4_FLASHMOE_TIMING");
+    const bool trace_enabled =
+        (trace && trace[0] && strcmp(trace, "0") != 0) ||
+        (timing && timing[0] && strcmp(timing, "0") != 0);
+    if (trace_enabled) {
+        fprintf(stderr,
+                "ds4: FlashMoE runtime ready%s%s (layers=%zu, cache_limit=%.2f GiB)\n",
+                context ? " for " : "",
+                context ? context : "",
+                e->flashmoe_manifest.count,
+                (double)e->flashmoe_cfg.cache_limit_bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+    return true;
+}
+
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
-    if (e->flashmoe_manifest_ready && !ds4_flashmoe_runtime_ready()) {
-        char ferr[256];
-        if (ds4_flashmoe_runtime_open(&e->flashmoe_manifest,
-                                      e->flashmoe_cfg.cache_limit_bytes,
-                                      ferr,
-                                      sizeof(ferr)) != 0) {
-            fprintf(stderr, "ds4: failed to initialize FlashMoE runtime cache: %s\n", ferr);
-            return 1;
-        }
+    if (!ds4_engine_prepare_flashmoe_runtime(e, "session")) {
+        return 1;
     }
     if (e->backend == DS4_BACKEND_CPU) {
         ds4_session *s = xcalloc(1, sizeof(*s));
