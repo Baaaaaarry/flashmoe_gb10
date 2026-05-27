@@ -4285,6 +4285,37 @@ typedef struct {
     bool owns_storage;
 } ds4_flashmoe_selected_pack;
 
+static bool flashmoe_build_selected_layout(
+        const int   *selected,
+        uint32_t     n_pairs,
+        int32_t     *selected_local,
+        uint16_t    *active_global,
+        uint32_t    *active_count_out) {
+    if (!selected || !selected_local || !active_global || !active_count_out || n_pairs == 0) return false;
+    int32_t local_by_global[DS4_N_EXPERT];
+    uint8_t selected_mask[DS4_N_EXPERT];
+    for (uint32_t i = 0; i < DS4_N_EXPERT; i++) {
+        local_by_global[i] = -1;
+        selected_mask[i] = 0;
+    }
+    for (uint32_t i = 0; i < n_pairs; i++) {
+        const int expert = selected[i];
+        if (expert < 0 || expert >= DS4_N_EXPERT) return false;
+        selected_mask[expert] = 1u;
+    }
+    uint32_t active_count = 0;
+    for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
+        if (!selected_mask[expert]) continue;
+        local_by_global[expert] = (int32_t)active_count;
+        active_global[active_count++] = (uint16_t)expert;
+    }
+    for (uint32_t i = 0; i < n_pairs; i++) {
+        selected_local[i] = local_by_global[selected[i]];
+    }
+    *active_count_out = active_count;
+    return true;
+}
+
 static void flashmoe_selected_pack_free(ds4_flashmoe_selected_pack *pack) {
     if (!pack) return;
     if (pack->owns_storage) {
@@ -4318,29 +4349,7 @@ static bool __attribute__((unused)) flashmoe_pack_selected_experts(
                                   &gate_rb,
                                   &up_rb,
                                   &down_rb);
-    int32_t local_by_global[DS4_N_EXPERT];
-    uint8_t selected_mask[DS4_N_EXPERT];
     uint16_t active_global[DS4_N_EXPERT];
-    for (uint32_t i = 0; i < DS4_N_EXPERT; i++) {
-        local_by_global[i] = -1;
-        selected_mask[i] = 0;
-    }
-
-    for (uint32_t i = 0; i < n_pairs; i++) {
-        const int expert = selected[i];
-        if (expert < 0 || expert >= DS4_N_EXPERT) {
-            flashmoe_selected_pack_free(out_pack);
-            return false;
-        }
-        selected_mask[expert] = 1u;
-    }
-
-    uint32_t active_count = 0;
-    for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
-        if (!selected_mask[expert]) continue;
-        local_by_global[expert] = (int32_t)active_count;
-        active_global[active_count++] = (uint16_t)expert;
-    }
     out_pack->owns_storage = (selected_local_reuse == NULL ||
                               gate_reuse == NULL ||
                               up_reuse == NULL ||
@@ -4348,8 +4357,14 @@ static bool __attribute__((unused)) flashmoe_pack_selected_experts(
     out_pack->selected_local = selected_local_reuse
         ? selected_local_reuse
         : xmalloc((size_t)n_pairs * sizeof(out_pack->selected_local[0]));
-    for (uint32_t i = 0; i < n_pairs; i++) {
-        out_pack->selected_local[i] = local_by_global[selected[i]];
+    uint32_t active_count = 0;
+    if (!flashmoe_build_selected_layout(selected,
+                                        n_pairs,
+                                        out_pack->selected_local,
+                                        active_global,
+                                        &active_count)) {
+        flashmoe_selected_pack_free(out_pack);
+        return false;
     }
 
     out_pack->gate_bytes = gate_reuse
@@ -9185,7 +9200,8 @@ typedef struct ds4_gpu_graph {
     ds4_gpu_tensor *flashmoe_decode_up_w[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS];
     ds4_gpu_tensor *flashmoe_decode_down_w[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS];
     ds4_gpu_tensor *flashmoe_decode_selected_gpu[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS];
-    int32_t flashmoe_decode_selected[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS][DS4_N_EXPERT_USED];
+    uint16_t flashmoe_decode_active[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS][DS4_N_EXPERT_USED];
+    uint8_t flashmoe_decode_active_count[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS];
     uint8_t flashmoe_decode_valid[DS4_N_LAYER][DS4_FLASHMOE_DECODE_CACHE_WAYS];
     uint8_t flashmoe_decode_next_way[DS4_N_LAYER];
     uint64_t flashmoe_gate_w_bytes;
@@ -9230,16 +9246,24 @@ static bool metal_graph_decode_routed_flashmoe(
     uint64_t down_expert_bytes = 0;
     uint64_t down_row_bytes = 0;
     uint32_t expert_count = 0;
+    uint16_t active_global[DS4_N_EXPERT_USED];
+    uint32_t active_count = 0;
     memset(&pack, 0, sizeof(pack));
 
     if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
+    if (!flashmoe_build_selected_layout(selected,
+                                        DS4_N_EXPERT_USED,
+                                        g->flashmoe_selected_local_host,
+                                        active_global,
+                                        &active_count)) goto cleanup;
     if (flashmoe_decode_gpu_cache_enabled()) {
         int hit_way = -1;
         for (uint32_t way = 0; way < DS4_FLASHMOE_DECODE_CACHE_WAYS; way++) {
             if (!g->flashmoe_decode_valid[il][way]) continue;
+            if (g->flashmoe_decode_active_count[il][way] != active_count) continue;
             bool same = true;
-            for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-                if (g->flashmoe_decode_selected[il][way][i] != selected[i]) {
+            for (uint32_t i = 0; i < active_count; i++) {
+                if (g->flashmoe_decode_active[il][way][i] != active_global[i]) {
                     same = false;
                     break;
                 }
@@ -9258,7 +9282,11 @@ static bool metal_graph_decode_routed_flashmoe(
             gate_row_bytes = routed_expert_row_bytes(layer->ffn_gate_exps);
             down_expert_bytes = routed_expert_row_bytes(layer->ffn_down_exps) * layer->ffn_down_exps->dim[1];
             down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
-            expert_count = DS4_N_EXPERT_USED;
+            expert_count = active_count;
+            if (ds4_gpu_tensor_write(selected_gpu,
+                                     0,
+                                     g->flashmoe_selected_local_host,
+                                     (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t)) == 0) goto cleanup;
         } else {
             const uint32_t way = g->flashmoe_decode_next_way[il] % DS4_FLASHMOE_DECODE_CACHE_WAYS;
             ds4_gpu_tensor *gate_reuse = g->flashmoe_decode_gate_w[il][way];
@@ -9289,8 +9317,9 @@ static bool metal_graph_decode_routed_flashmoe(
             down_expert_bytes = pack.down_expert_bytes;
             down_row_bytes = pack.down_row_bytes;
             expert_count = pack.active_count;
-            for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-                g->flashmoe_decode_selected[il][way][i] = selected[i];
+            g->flashmoe_decode_active_count[il][way] = (uint8_t)active_count;
+            for (uint32_t i = 0; i < active_count; i++) {
+                g->flashmoe_decode_active[il][way][i] = active_global[i];
             }
             g->flashmoe_decode_valid[il][way] = 1u;
             g->flashmoe_decode_next_way[il] = (uint8_t)((way + 1u) % DS4_FLASHMOE_DECODE_CACHE_WAYS);
@@ -9902,8 +9931,9 @@ static bool metal_graph_alloc_raw_cap(
                 g->flashmoe_decode_selected_gpu[il][way] =
                         ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t));
                 g->flashmoe_decode_valid[il][way] = 0u;
+                g->flashmoe_decode_active_count[il][way] = 0u;
                 for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-                    g->flashmoe_decode_selected[il][way][i] = -1;
+                    g->flashmoe_decode_active[il][way][i] = 0u;
                 }
             }
             g->flashmoe_decode_next_way[il] = 0u;
