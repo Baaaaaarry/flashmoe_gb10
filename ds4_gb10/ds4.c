@@ -135,7 +135,7 @@ static int g_ds4_lock_fd = -1;
  */
 #define QK_K 256
 
-typedef struct ds4_gpu_graph {
+typedef struct {
     uint8_t  scales[QK_K / 16];
     uint8_t  qs[QK_K / 4];
     uint16_t d;
@@ -9163,7 +9163,7 @@ static void print_vec_stats(const char *name, const float *x, uint64_t n) {
  * tensor names follow the model stages rather than generic graph nodes.
  */
 
-typedef struct {
+typedef struct ds4_gpu_graph {
     /* One-token decode tensors.  These stay allocated for the life of a
      * session; a generated token enters as an embedding in cur_hc and leaves as
      * logits after all 43 layers update their raw/compressed/indexer caches. */
