@@ -9241,10 +9241,15 @@ typedef struct ds4_gpu_graph {
     double flashmoe_prefill_upload_s;
     double flashmoe_prefill_kernel_s;
     bool flashmoe_prefill_used;
-    uint64_t flashmoe_decode_slot_hits;
-    uint64_t flashmoe_decode_slot_misses;
-    double flashmoe_decode_slot_upload_s;
-    bool flashmoe_decode_slot_used;
+    uint64_t flashmoe_decode_layers;
+    uint64_t flashmoe_decode_hits;
+    uint64_t flashmoe_decode_misses;
+    double flashmoe_decode_router_s;
+    double flashmoe_decode_host_s;
+    double flashmoe_decode_upload_s;
+    double flashmoe_decode_kernel_s;
+    double flashmoe_decode_other_s;
+    bool flashmoe_decode_used;
     ds4_gpu_tensor *batch_ffn_out;
     bool materialize_ffn_out;
     ds4_gpu_tensor *directional_steering_dirs;
@@ -9268,7 +9273,9 @@ static bool flashmoe_decode_prepare_slot_cache(
         uint64_t                *gate_row_bytes,
         uint64_t                *down_expert_bytes,
         uint64_t                *down_row_bytes,
-        uint32_t                *slot_count_out) {
+        uint32_t                *slot_count_out,
+        double                  *host_s_out,
+        double                  *upload_s_out) {
     const uint32_t slot_count = flashmoe_decode_slot_count();
     uint32_t used_slots[DS4_N_EXPERT_USED];
     uint32_t used_count = 0;
@@ -9276,6 +9283,8 @@ static bool flashmoe_decode_prepare_slot_cache(
     uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
     uint64_t gate_rb = 0, up_rb = 0, down_rb = 0;
     char ferr[256];
+    double host_s = 0.0;
+    double upload_s = 0.0;
 
     flashmoe_expected_blob_layout(layer,
                                   &gate_bytes,
@@ -9292,8 +9301,8 @@ static bool flashmoe_decode_prepare_slot_cache(
             if (g->flashmoe_decode_slot_valid[il][slot] &&
                 g->flashmoe_decode_slot_expert[il][slot] == selected[i]) {
                 if (flashmoe_timing_enabled()) {
-                    g->flashmoe_decode_slot_used = true;
-                    g->flashmoe_decode_slot_hits += 1u;
+                    g->flashmoe_decode_used = true;
+                    g->flashmoe_decode_hits += 1u;
                 }
                 slot_index = (int32_t)slot;
                 break;
@@ -9325,6 +9334,7 @@ static bool flashmoe_decode_prepare_slot_cache(
                 if (slot == slot_count) slot = g->flashmoe_decode_next_slot[il] % slot_count;
                 g->flashmoe_decode_next_slot[il] = (slot + 1u) % slot_count;
             }
+            const double t_host0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
             uint64_t actual_size = 0;
             const uint8_t *blob = ds4_flashmoe_runtime_get_blob((uint16_t)il,
                                                                 (uint16_t)selected[i],
@@ -9341,15 +9351,18 @@ static bool flashmoe_decode_prepare_slot_cache(
                 return false;
             }
             const double t_upload0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
+            if (flashmoe_timing_enabled()) {
+                host_s += t_upload0 - t_host0;
+            }
             if (!flashmoe_write_slot_tensor(g->flashmoe_decode_gate_slots[il], slot, gate_bytes, blob) ||
                 !flashmoe_write_slot_tensor(g->flashmoe_decode_up_slots[il], slot, up_bytes, blob + gate_bytes) ||
                 !flashmoe_write_slot_tensor(g->flashmoe_decode_down_slots[il], slot, down_bytes, blob + gate_bytes + up_bytes)) {
                 return false;
             }
             if (flashmoe_timing_enabled()) {
-                g->flashmoe_decode_slot_used = true;
-                g->flashmoe_decode_slot_misses += 1u;
-                g->flashmoe_decode_slot_upload_s += now_sec() - t_upload0;
+                g->flashmoe_decode_used = true;
+                g->flashmoe_decode_misses += 1u;
+                upload_s += now_sec() - t_upload0;
             }
             g->flashmoe_decode_slot_valid[il][slot] = 1u;
             g->flashmoe_decode_slot_expert[il][slot] = selected[i];
@@ -9371,13 +9384,19 @@ static bool flashmoe_decode_prepare_slot_cache(
     if (down_expert_bytes) *down_expert_bytes = down_bytes;
     if (down_row_bytes) *down_row_bytes = down_rb;
     if (slot_count_out) *slot_count_out = slot_count;
+    if (host_s_out) *host_s_out = host_s;
+    if (upload_s_out) *upload_s_out = upload_s;
     return true;
 }
 
 static bool metal_graph_decode_routed_flashmoe(
         ds4_gpu_graph          *g,
         const ds4_layer_weights *layer,
-        uint32_t                il) {
+        uint32_t                il,
+        double                 *readback_s_out,
+        double                 *host_s_out,
+        double                 *upload_s_out,
+        double                 *kernel_s_out) {
     int selected[DS4_N_EXPERT_USED];
     ds4_gpu_tensor *gate_slots = NULL, *up_slots = NULL, *down_slots = NULL, *selected_gpu = NULL;
     bool ok = false;
@@ -9386,8 +9405,14 @@ static bool metal_graph_decode_routed_flashmoe(
     uint64_t down_expert_bytes = 0;
     uint64_t down_row_bytes = 0;
     uint32_t slot_count = 0;
+    double readback_s = 0.0;
+    double host_s = 0.0;
+    double upload_s = 0.0;
+    double kernel_s = 0.0;
 
+    const double t_read0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
     if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
+    if (flashmoe_timing_enabled()) readback_s += now_sec() - t_read0;
     if (!flashmoe_decode_prepare_slot_cache(g,
                                             layer,
                                             il,
@@ -9400,7 +9425,10 @@ static bool metal_graph_decode_routed_flashmoe(
                                             &gate_row_bytes,
                                             &down_expert_bytes,
                                             &down_row_bytes,
-                                            &slot_count)) goto cleanup;
+                                            &slot_count,
+                                            &host_s,
+                                            &upload_s)) goto cleanup;
+    const double t_kernel0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
     ok = ds4_gpu_routed_moe_one_external_slots_tensor(g->routed_out,
                                                       g->routed_gate,
                                                       g->routed_up,
@@ -9424,8 +9452,13 @@ static bool metal_graph_decode_routed_flashmoe(
                                                       DS4_N_EXPERT_USED,
                                                       DS4_SWIGLU_CLAMP_EXP,
                                                       g->ffn_norm) != 0;
+    if (flashmoe_timing_enabled()) kernel_s += now_sec() - t_kernel0;
 
 cleanup:
+    if (readback_s_out) *readback_s_out = readback_s;
+    if (host_s_out) *host_s_out = host_s;
+    if (upload_s_out) *upload_s_out = upload_s;
+    if (kernel_s_out) *kernel_s_out = kernel_s;
     return ok;
 }
 
@@ -11037,6 +11070,13 @@ static bool metal_graph_encode_decode_layer(
     const uint64_t gate_expert_bytes = expert_mid_dim * gate_row_bytes;
     const uint64_t down_row_bytes = routed_expert_row_bytes(layer->ffn_down_exps);
     const uint64_t down_expert_bytes = routed_out_dim * down_row_bytes;
+    const double decode_flashmoe_layer_t0 = flashmoe_timing_enabled() && ds4_flashmoe_runtime_ready() ? now_sec() : 0.0;
+    double decode_router_s = 0.0;
+    double decode_readback_s = 0.0;
+    double decode_host_s = 0.0;
+    double decode_upload_s = 0.0;
+    double decode_kernel_s = 0.0;
+    const double t_router0 = flashmoe_timing_enabled() && ds4_flashmoe_runtime_ready() ? now_sec() : 0.0;
     if (ok) ok = metal_graph_matmul_plain_tensor(g->router_logits, model, layer->ffn_gate_inp,
                                                  DS4_N_EMBD, DS4_N_EXPERT, g->ffn_norm, 1);
     if (ok) ok = ds4_gpu_router_select_tensor(g->router_selected, g->router_weights, g->router_probs,
@@ -11050,6 +11090,9 @@ static bool metal_graph_encode_decode_layer(
                                                 layer->ffn_exp_probs_b != NULL,
                                                 layer->ffn_gate_tid2eid != NULL,
                                                 g->router_logits) != 0;
+    if (flashmoe_timing_enabled() && ds4_flashmoe_runtime_ready()) {
+        decode_router_s += now_sec() - t_router0;
+    }
     DS4_METAL_PROFILE_DECODE_STAGE("router");
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_logits", g->router_logits, DS4_N_EXPERT, il, pos);
@@ -11059,7 +11102,13 @@ static bool metal_graph_encode_decode_layer(
     }
     if (ok) {
         if (ds4_flashmoe_runtime_ready()) {
-            ok = metal_graph_decode_routed_flashmoe(g, layer, il);
+            ok = metal_graph_decode_routed_flashmoe(g,
+                                                    layer,
+                                                    il,
+                                                    &decode_readback_s,
+                                                    &decode_host_s,
+                                                    &decode_upload_s,
+                                                    &decode_kernel_s);
         } else {
             ok = ds4_gpu_routed_moe_one_tensor(g->routed_out,
                                                  g->routed_gate,
@@ -11181,6 +11230,20 @@ static bool metal_graph_encode_decode_layer(
     }
     DS4_METAL_PROFILE_DECODE_STAGE("ffn_hc_post");
 #undef DS4_METAL_PROFILE_DECODE_STAGE
+    if (flashmoe_timing_enabled() && ds4_flashmoe_runtime_ready()) {
+        const double decode_flashmoe_layer_t1 = now_sec();
+        g->flashmoe_decode_used = true;
+        g->flashmoe_decode_layers += 1u;
+        g->flashmoe_decode_router_s += decode_router_s + decode_readback_s;
+        g->flashmoe_decode_host_s += decode_host_s;
+        g->flashmoe_decode_upload_s += decode_upload_s;
+        g->flashmoe_decode_kernel_s += decode_kernel_s;
+        double accounted = decode_router_s + decode_readback_s + decode_host_s + decode_upload_s + decode_kernel_s;
+        double total = decode_flashmoe_layer_t1 - decode_flashmoe_layer_t0;
+        if (total > accounted) {
+            g->flashmoe_decode_other_s += total - accounted;
+        }
+    }
     if (ok) {
         metal_graph_debug_dump_tensor("hc_ffn_post", g->after_ffn_hc, hc_dim, il, pos);
     }
@@ -16763,6 +16826,15 @@ static int generate_metal_graph_raw_swa(
     int pos = prompt->len;
     int n_generated = 0;
     int n_decode_eval = 0;
+    g.flashmoe_decode_layers = 0;
+    g.flashmoe_decode_hits = 0;
+    g.flashmoe_decode_misses = 0;
+    g.flashmoe_decode_router_s = 0.0;
+    g.flashmoe_decode_host_s = 0.0;
+    g.flashmoe_decode_upload_s = 0.0;
+    g.flashmoe_decode_kernel_s = 0.0;
+    g.flashmoe_decode_other_s = 0.0;
+    g.flashmoe_decode_used = false;
     const double t_decode0 = now_sec();
     for (int i = 0; i < n_predict && pos < ctx_size; i++) {
         if (trace_top) {
@@ -16802,12 +16874,17 @@ static int generate_metal_graph_raw_swa(
 
     const double prefill_s = t_prefill1 - t_prefill0;
     const double decode_s = t_decode1 - t_decode0;
-    if (flashmoe_timing_enabled() && g.flashmoe_decode_slot_used) {
+    if (flashmoe_timing_enabled() && g.flashmoe_decode_used) {
         fprintf(stderr,
-                "ds4: flashmoe decode slot summary hits=%" PRIu64 " misses=%" PRIu64 " miss_upload=%.3fms\n",
-                g.flashmoe_decode_slot_hits,
-                g.flashmoe_decode_slot_misses,
-                g.flashmoe_decode_slot_upload_s * 1000.0);
+                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " router_readback=%.3fms host_pack=%.3fms h2d_write=%.3fms routed_kernel=%.3fms dense_shared_other=%.3fms\n",
+                g.flashmoe_decode_layers,
+                g.flashmoe_decode_hits,
+                g.flashmoe_decode_misses,
+                g.flashmoe_decode_router_s * 1000.0,
+                g.flashmoe_decode_host_s * 1000.0,
+                g.flashmoe_decode_upload_s * 1000.0,
+                g.flashmoe_decode_kernel_s * 1000.0,
+                g.flashmoe_decode_other_s * 1000.0);
     }
     ds4_log(stderr,
             DS4_LOG_TIMING,
