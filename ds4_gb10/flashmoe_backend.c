@@ -617,33 +617,37 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
         set_err(err, errlen, "FlashMoE layer pack layout does not match runtime expectation");
         return 1;
     }
-    int fd = runtime_layer_fd(&g_runtime, layer_pack);
-    if (fd < 0) {
-        set_err(err, errlen, "failed to open FlashMoE layer pack");
-        return 1;
-    }
     const uint64_t expert_size = layer_pack->expert_size;
     for (uint32_t i = 0; i < n_experts; i++) {
         if (expert_ids[i] >= layer_pack->num_experts) {
             set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
             return 1;
         }
-        const uint64_t base = (uint64_t)expert_ids[i] * expert_size;
+        ds4_flashmoe_blob_entry *entry =
+                runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
+        if (!entry) {
+            if (runtime_load_blob(&g_runtime,
+                                  layer_pack,
+                                  expert_ids[i],
+                                  expert_size,
+                                  err,
+                                  errlen) != 0) {
+                return 1;
+            }
+            entry = runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
+        }
+        if (!entry || entry->size_bytes != expert_size || !entry->bytes) {
+            set_err(err, errlen, "FlashMoE blob cache load failed");
+            return 1;
+        }
+        entry->last_use = ++g_runtime.use_clock;
+        const uint8_t *blob = entry->bytes;
         uint8_t *gate_ptr = gate_dst + (uint64_t)i * gate_bytes;
         uint8_t *up_ptr = up_dst + (uint64_t)i * up_bytes;
         uint8_t *down_ptr = down_dst + (uint64_t)i * down_bytes;
-        if (!read_fully_at(fd, gate_ptr, gate_bytes, base)) {
-            set_err(err, errlen, "failed to read FlashMoE gate slice");
-            return 1;
-        }
-        if (!read_fully_at(fd, up_ptr, up_bytes, base + gate_bytes)) {
-            set_err(err, errlen, "failed to read FlashMoE up slice");
-            return 1;
-        }
-        if (!read_fully_at(fd, down_ptr, down_bytes, base + gate_bytes + up_bytes)) {
-            set_err(err, errlen, "failed to read FlashMoE down slice");
-            return 1;
-        }
+        memcpy(gate_ptr, blob, (size_t)gate_bytes);
+        memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
+        memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
     }
     return 0;
 }
