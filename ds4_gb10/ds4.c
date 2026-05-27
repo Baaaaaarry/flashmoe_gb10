@@ -527,6 +527,10 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
 }
 
+static double __attribute__((unused)) ds4_now_seconds(void) {
+    return now_sec();
+}
+
 static const char *ds4_log_color_code(ds4_log_type type) {
     switch (type) {
     case DS4_LOG_PREFILL:
