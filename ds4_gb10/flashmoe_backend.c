@@ -621,26 +621,23 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
     const uint64_t expert_size = layer_pack->expert_size;
     int fd = -1;
     uint8_t *scratch = NULL;
+    uint64_t scratch_bytes = 0;
     if (!prefer_cache) {
         fd = runtime_layer_fd(&g_runtime, layer_pack);
         if (fd < 0) {
             set_err(err, errlen, "failed to open FlashMoE layer pack");
             return 1;
         }
-        scratch = (uint8_t *)malloc((size_t)expert_size);
-        if (!scratch) {
-            set_err(err, errlen, "out of memory allocating FlashMoE direct read buffer");
-            return 1;
-        }
     }
-    for (uint32_t i = 0; i < n_experts; i++) {
+    uint32_t i = 0;
+    while (i < n_experts) {
         if (expert_ids[i] >= layer_pack->num_experts) {
             free(scratch);
             set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
             return 1;
         }
-        const uint8_t *blob = NULL;
         if (prefer_cache) {
+            const uint8_t *blob = NULL;
             ds4_flashmoe_blob_entry *entry =
                     runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
             if (!entry) {
@@ -660,21 +657,50 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
             }
             entry->last_use = ++g_runtime.use_clock;
             blob = entry->bytes;
-        } else {
-            const uint64_t base = (uint64_t)expert_ids[i] * expert_size;
-            if (!read_fully_at(fd, scratch, expert_size, base)) {
+            uint8_t *gate_ptr = gate_dst + (uint64_t)i * gate_bytes;
+            uint8_t *up_ptr = up_dst + (uint64_t)i * up_bytes;
+            uint8_t *down_ptr = down_dst + (uint64_t)i * down_bytes;
+            memcpy(gate_ptr, blob, (size_t)gate_bytes);
+            memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
+            memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
+            i++;
+            continue;
+        }
+
+        uint32_t run_end = i + 1u;
+        while (run_end < n_experts &&
+               expert_ids[run_end] < layer_pack->num_experts &&
+               expert_ids[run_end] == (uint16_t)(expert_ids[run_end - 1] + 1u)) {
+            run_end++;
+        }
+        const uint32_t run_count = run_end - i;
+        const uint64_t run_bytes = (uint64_t)run_count * expert_size;
+        if (run_bytes > scratch_bytes) {
+            uint8_t *new_scratch = (uint8_t *)realloc(scratch, (size_t)run_bytes);
+            if (!new_scratch) {
                 free(scratch);
-                set_err(err, errlen, "failed to read FlashMoE expert blob");
+                set_err(err, errlen, "out of memory growing FlashMoE direct read buffer");
                 return 1;
             }
-            blob = scratch;
+            scratch = new_scratch;
+            scratch_bytes = run_bytes;
         }
-        uint8_t *gate_ptr = gate_dst + (uint64_t)i * gate_bytes;
-        uint8_t *up_ptr = up_dst + (uint64_t)i * up_bytes;
-        uint8_t *down_ptr = down_dst + (uint64_t)i * down_bytes;
-        memcpy(gate_ptr, blob, (size_t)gate_bytes);
-        memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
-        memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
+        const uint64_t base = (uint64_t)expert_ids[i] * expert_size;
+        if (!read_fully_at(fd, scratch, run_bytes, base)) {
+            free(scratch);
+            set_err(err, errlen, "failed to read FlashMoE expert blob run");
+            return 1;
+        }
+        for (uint32_t j = 0; j < run_count; j++) {
+            const uint8_t *blob = scratch + (uint64_t)j * expert_size;
+            uint8_t *gate_ptr = gate_dst + (uint64_t)(i + j) * gate_bytes;
+            uint8_t *up_ptr = up_dst + (uint64_t)(i + j) * up_bytes;
+            uint8_t *down_ptr = down_dst + (uint64_t)(i + j) * down_bytes;
+            memcpy(gate_ptr, blob, (size_t)gate_bytes);
+            memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
+            memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
+        }
+        i = run_end;
     }
     free(scratch);
     return 0;
