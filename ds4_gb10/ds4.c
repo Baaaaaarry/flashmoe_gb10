@@ -135,7 +135,7 @@ static int g_ds4_lock_fd = -1;
  */
 #define QK_K 256
 
-typedef struct {
+typedef struct ds4_gpu_graph {
     uint8_t  scales[QK_K / 16];
     uint8_t  qs[QK_K / 4];
     uint16_t d;
@@ -4466,6 +4466,8 @@ static bool flashmoe_write_slot_tensor(ds4_gpu_tensor *base,
     ds4_gpu_tensor_free(view);
     return ok;
 }
+
+typedef struct ds4_gpu_graph ds4_gpu_graph;
 
 static bool flashmoe_decode_prepare_slot_cache(
         ds4_gpu_graph          *g,
