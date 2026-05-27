@@ -10409,6 +10409,23 @@ extern "C" int ds4_gpu_routed_moe_one_external_tensor(ds4_gpu_tensor *out, ds4_g
                                   expert_in_dim, expert_mid_dim, out_dim,
                                   selected, weights, n_expert, clamp, x, 1);
 }
+extern "C" int ds4_gpu_routed_moe_one_external_slots_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const ds4_gpu_tensor *gate_slots, const ds4_gpu_tensor *up_slots, const ds4_gpu_tensor *down_slots, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t slot_count, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected_slots, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x) {
+    if (!gate_slots || !up_slots || !down_slots) return 0;
+    if (gate_slots->bytes < (uint64_t)slot_count * gate_expert_bytes ||
+        up_slots->bytes < (uint64_t)slot_count * gate_expert_bytes ||
+        down_slots->bytes < (uint64_t)slot_count * down_expert_bytes) {
+        return 0;
+    }
+    return routed_moe_launch_core(out, gate, up, mid, down,
+                                  (const char *)gate_slots->ptr,
+                                  (const char *)up_slots->ptr,
+                                  (const char *)down_slots->ptr,
+                                  gate_type, down_type,
+                                  gate_expert_bytes, gate_row_bytes,
+                                  down_expert_bytes, down_row_bytes,
+                                  expert_in_dim, expert_mid_dim, out_dim,
+                                  selected_slots, weights, n_expert, clamp, x, 1);
+}
 extern "C" int ds4_gpu_routed_moe_batch_external_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const ds4_gpu_tensor *gate_w, const ds4_gpu_tensor *up_w, const ds4_gpu_tensor *down_w, uint32_t gate_type, uint32_t down_type, uint64_t gate_expert_bytes, uint64_t gate_row_bytes, uint64_t down_expert_bytes, uint64_t down_row_bytes, uint32_t expert_count, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t n_tokens, bool *mid_is_f16) {
     if (mid_is_f16) *mid_is_f16 = false;
     if (!gate_w || !up_w || !down_w) return 0;

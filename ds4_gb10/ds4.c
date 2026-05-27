@@ -4470,6 +4470,26 @@ static bool flashmoe_decode_gpu_cache_enabled(void) {
     return cache != 0;
 }
 
+#define DS4_FLASHMOE_DECODE_SLOT_CAP 16u
+
+static uint32_t flashmoe_decode_slot_count(void) {
+    static uint32_t cache = 0;
+    if (cache != 0) return cache;
+    const char *env = getenv("DS4_FLASHMOE_DECODE_SLOT_COUNT");
+    uint32_t count = 8u;
+    if (env && env[0]) {
+        char *end = NULL;
+        unsigned long parsed = strtoul(env, &end, 10);
+        if (end && end != env && *end == '\0' &&
+            parsed >= DS4_N_EXPERT_USED &&
+            parsed <= DS4_FLASHMOE_DECODE_SLOT_CAP) {
+            count = (uint32_t)parsed;
+        }
+    }
+    cache = count;
+    return cache;
+}
+
 static bool __attribute__((unused)) flashmoe_write_slot_tensor(ds4_gpu_tensor *base,
                                        uint64_t slot_index,
                                        uint64_t slot_bytes,
@@ -9195,12 +9215,13 @@ typedef struct ds4_gpu_graph {
     ds4_gpu_tensor *flashmoe_up_w;
     ds4_gpu_tensor *flashmoe_down_w;
     ds4_gpu_tensor *flashmoe_selected_gpu;
-    ds4_gpu_tensor *flashmoe_decode_gate_w[DS4_N_LAYER];
-    ds4_gpu_tensor *flashmoe_decode_up_w[DS4_N_LAYER];
-    ds4_gpu_tensor *flashmoe_decode_down_w[DS4_N_LAYER];
+    ds4_gpu_tensor *flashmoe_decode_gate_slots[DS4_N_LAYER];
+    ds4_gpu_tensor *flashmoe_decode_up_slots[DS4_N_LAYER];
+    ds4_gpu_tensor *flashmoe_decode_down_slots[DS4_N_LAYER];
     ds4_gpu_tensor *flashmoe_decode_selected_gpu[DS4_N_LAYER];
-    int32_t flashmoe_decode_selected[DS4_N_LAYER][DS4_N_EXPERT_USED];
-    bool flashmoe_decode_valid[DS4_N_LAYER];
+    int32_t flashmoe_decode_slot_expert[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
+    uint8_t flashmoe_decode_slot_valid[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
+    uint32_t flashmoe_decode_next_slot[DS4_N_LAYER];
     uint64_t flashmoe_gate_w_bytes;
     uint64_t flashmoe_up_w_bytes;
     uint64_t flashmoe_down_w_bytes;
@@ -9220,6 +9241,10 @@ typedef struct ds4_gpu_graph {
     double flashmoe_prefill_upload_s;
     double flashmoe_prefill_kernel_s;
     bool flashmoe_prefill_used;
+    uint64_t flashmoe_decode_slot_hits;
+    uint64_t flashmoe_decode_slot_misses;
+    double flashmoe_decode_slot_upload_s;
+    bool flashmoe_decode_slot_used;
     ds4_gpu_tensor *batch_ffn_out;
     bool materialize_ffn_out;
     ds4_gpu_tensor *directional_steering_dirs;
@@ -9230,122 +9255,177 @@ typedef struct ds4_gpu_graph {
 } ds4_gpu_graph;
 
 #ifndef DS4_NO_GPU
+static bool flashmoe_decode_prepare_slot_cache(
+        ds4_gpu_graph           *g,
+        const ds4_layer_weights *layer,
+        uint32_t                 il,
+        const int               *selected,
+        ds4_gpu_tensor         **gate_slots,
+        ds4_gpu_tensor         **up_slots,
+        ds4_gpu_tensor         **down_slots,
+        ds4_gpu_tensor         **selected_gpu,
+        uint64_t                *gate_expert_bytes,
+        uint64_t                *gate_row_bytes,
+        uint64_t                *down_expert_bytes,
+        uint64_t                *down_row_bytes,
+        uint32_t                *slot_count_out) {
+    const uint32_t slot_count = flashmoe_decode_slot_count();
+    uint32_t used_slots[DS4_N_EXPERT_USED];
+    uint32_t used_count = 0;
+    int32_t selected_local[DS4_N_EXPERT_USED];
+    uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
+    uint64_t gate_rb = 0, up_rb = 0, down_rb = 0;
+    char ferr[256];
+
+    flashmoe_expected_blob_layout(layer,
+                                  &gate_bytes,
+                                  &up_bytes,
+                                  &down_bytes,
+                                  &gate_rb,
+                                  &up_rb,
+                                  &down_rb);
+    const uint64_t expected_size = gate_bytes + up_bytes + down_bytes;
+
+    for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
+        int32_t slot_index = -1;
+        for (uint32_t slot = 0; slot < slot_count; slot++) {
+            if (g->flashmoe_decode_slot_valid[il][slot] &&
+                g->flashmoe_decode_slot_expert[il][slot] == selected[i]) {
+                if (flashmoe_timing_enabled()) {
+                    g->flashmoe_decode_slot_used = true;
+                    g->flashmoe_decode_slot_hits += 1u;
+                }
+                slot_index = (int32_t)slot;
+                break;
+            }
+        }
+        if (slot_index < 0) {
+            uint32_t slot = slot_count;
+            for (uint32_t probe = 0; probe < slot_count; probe++) {
+                if (!g->flashmoe_decode_slot_valid[il][probe]) {
+                    slot = probe;
+                    break;
+                }
+            }
+            if (slot == slot_count) {
+                for (uint32_t attempt = 0; attempt < slot_count; attempt++) {
+                    const uint32_t probe = (g->flashmoe_decode_next_slot[il] + attempt) % slot_count;
+                    bool already_used = false;
+                    for (uint32_t u = 0; u < used_count; u++) {
+                        if (used_slots[u] == probe) {
+                            already_used = true;
+                            break;
+                        }
+                    }
+                    if (!already_used) {
+                        slot = probe;
+                        break;
+                    }
+                }
+                if (slot == slot_count) slot = g->flashmoe_decode_next_slot[il] % slot_count;
+                g->flashmoe_decode_next_slot[il] = (slot + 1u) % slot_count;
+            }
+            uint64_t actual_size = 0;
+            const uint8_t *blob = ds4_flashmoe_runtime_get_blob((uint16_t)il,
+                                                                (uint16_t)selected[i],
+                                                                expected_size,
+                                                                &actual_size,
+                                                                ferr,
+                                                                sizeof(ferr));
+            if (!blob || actual_size != expected_size) {
+                fprintf(stderr,
+                        "ds4: FlashMoE backend failed to load decode layer=%u expert=%d blob: %s\n",
+                        il,
+                        selected[i],
+                        ferr[0] ? ferr : "unexpected blob size");
+                return false;
+            }
+            const double t_upload0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
+            if (!flashmoe_write_slot_tensor(g->flashmoe_decode_gate_slots[il], slot, gate_bytes, blob) ||
+                !flashmoe_write_slot_tensor(g->flashmoe_decode_up_slots[il], slot, up_bytes, blob + gate_bytes) ||
+                !flashmoe_write_slot_tensor(g->flashmoe_decode_down_slots[il], slot, down_bytes, blob + gate_bytes + up_bytes)) {
+                return false;
+            }
+            if (flashmoe_timing_enabled()) {
+                g->flashmoe_decode_slot_used = true;
+                g->flashmoe_decode_slot_misses += 1u;
+                g->flashmoe_decode_slot_upload_s += now_sec() - t_upload0;
+            }
+            g->flashmoe_decode_slot_valid[il][slot] = 1u;
+            g->flashmoe_decode_slot_expert[il][slot] = selected[i];
+            slot_index = (int32_t)slot;
+        }
+        selected_local[i] = slot_index;
+        used_slots[used_count++] = (uint32_t)slot_index;
+    }
+
+    if (ds4_gpu_tensor_write(g->flashmoe_decode_selected_gpu[il], 0, selected_local, sizeof(selected_local)) == 0) {
+        return false;
+    }
+    if (gate_slots) *gate_slots = g->flashmoe_decode_gate_slots[il];
+    if (up_slots) *up_slots = g->flashmoe_decode_up_slots[il];
+    if (down_slots) *down_slots = g->flashmoe_decode_down_slots[il];
+    if (selected_gpu) *selected_gpu = g->flashmoe_decode_selected_gpu[il];
+    if (gate_expert_bytes) *gate_expert_bytes = gate_bytes;
+    if (gate_row_bytes) *gate_row_bytes = gate_rb;
+    if (down_expert_bytes) *down_expert_bytes = down_bytes;
+    if (down_row_bytes) *down_row_bytes = down_rb;
+    if (slot_count_out) *slot_count_out = slot_count;
+    return true;
+}
+
 static bool metal_graph_decode_routed_flashmoe(
         ds4_gpu_graph          *g,
         const ds4_layer_weights *layer,
         uint32_t                il) {
     int selected[DS4_N_EXPERT_USED];
-    ds4_flashmoe_selected_pack pack;
-    ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL, *selected_gpu = NULL;
+    ds4_gpu_tensor *gate_slots = NULL, *up_slots = NULL, *down_slots = NULL, *selected_gpu = NULL;
     bool ok = false;
     uint64_t gate_expert_bytes = 0;
     uint64_t gate_row_bytes = 0;
     uint64_t down_expert_bytes = 0;
     uint64_t down_row_bytes = 0;
-    uint32_t expert_count = 0;
-    memset(&pack, 0, sizeof(pack));
+    uint32_t slot_count = 0;
 
     if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
-    if (flashmoe_timing_enabled()) {
-        (void)0;
-    }
-    bool cache_hit = false;
-    if (flashmoe_decode_gpu_cache_enabled() && g->flashmoe_decode_valid[il]) {
-        cache_hit = true;
-        for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-            if (g->flashmoe_decode_selected[il][i] != selected[i]) {
-                cache_hit = false;
-                break;
-            }
-        }
-    }
-    if (cache_hit) {
-        gate_w = g->flashmoe_decode_gate_w[il];
-        up_w = g->flashmoe_decode_up_w[il];
-        down_w = g->flashmoe_decode_down_w[il];
-        selected_gpu = g->flashmoe_decode_selected_gpu[il];
-    } else {
-        ds4_gpu_tensor *gate_reuse = flashmoe_decode_gpu_cache_enabled() ? g->flashmoe_decode_gate_w[il] : g->flashmoe_gate_w;
-        ds4_gpu_tensor *up_reuse = flashmoe_decode_gpu_cache_enabled() ? g->flashmoe_decode_up_w[il] : g->flashmoe_up_w;
-        ds4_gpu_tensor *down_reuse = flashmoe_decode_gpu_cache_enabled() ? g->flashmoe_decode_down_w[il] : g->flashmoe_down_w;
-        ds4_gpu_tensor *selected_reuse = flashmoe_decode_gpu_cache_enabled() ? g->flashmoe_decode_selected_gpu[il] : g->flashmoe_selected_gpu;
-        if (!flashmoe_pack_selected_experts(layer,
+    if (!flashmoe_decode_prepare_slot_cache(g,
+                                            layer,
                                             il,
                                             selected,
-                                            DS4_N_EXPERT_USED,
-                                            g->flashmoe_selected_local_host,
-                                            g->flashmoe_gate_host,
-                                            g->flashmoe_up_host,
-                                            g->flashmoe_down_host,
-                                            &pack)) goto cleanup;
-        if (!flashmoe_upload_selected_pack(&pack,
-                                           DS4_N_EXPERT_USED,
-                                           gate_reuse,
-                                           up_reuse,
-                                           down_reuse,
-                                           selected_reuse,
-                                           &gate_w,
-                                           &up_w,
-                                           &down_w,
-                                           &selected_gpu)) goto cleanup;
-        gate_expert_bytes = pack.gate_expert_bytes;
-        gate_row_bytes = pack.gate_row_bytes;
-        down_expert_bytes = pack.down_expert_bytes;
-        down_row_bytes = pack.down_row_bytes;
-        expert_count = pack.active_count;
-        if (flashmoe_decode_gpu_cache_enabled()) {
-            for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-                g->flashmoe_decode_selected[il][i] = selected[i];
-            }
-            g->flashmoe_decode_valid[il] = true;
-        }
-    }
-    ok = ds4_gpu_routed_moe_one_external_tensor(g->routed_out,
-                                                g->routed_gate,
-                                                g->routed_up,
-                                                g->routed_mid,
-                                                g->routed_down,
-                                                gate_w,
-                                                up_w,
-                                                down_w,
-                                                layer->ffn_gate_exps->type,
-                                                layer->ffn_down_exps->type,
-                                                gate_expert_bytes,
-                                                gate_row_bytes,
-                                                down_expert_bytes,
-                                                down_row_bytes,
-                                                expert_count,
-                                                (uint32_t)layer->ffn_gate_exps->dim[0],
-                                                (uint32_t)layer->ffn_down_exps->dim[0],
-                                                (uint32_t)layer->ffn_down_exps->dim[1],
-                                                selected_gpu,
-                                                g->router_weights,
-                                                DS4_N_EXPERT_USED,
-                                                DS4_SWIGLU_CLAMP_EXP,
-                                                g->ffn_norm) != 0;
+                                            &gate_slots,
+                                            &up_slots,
+                                            &down_slots,
+                                            &selected_gpu,
+                                            &gate_expert_bytes,
+                                            &gate_row_bytes,
+                                            &down_expert_bytes,
+                                            &down_row_bytes,
+                                            &slot_count)) goto cleanup;
+    ok = ds4_gpu_routed_moe_one_external_slots_tensor(g->routed_out,
+                                                      g->routed_gate,
+                                                      g->routed_up,
+                                                      g->routed_mid,
+                                                      g->routed_down,
+                                                      gate_slots,
+                                                      up_slots,
+                                                      down_slots,
+                                                      layer->ffn_gate_exps->type,
+                                                      layer->ffn_down_exps->type,
+                                                      gate_expert_bytes,
+                                                      gate_row_bytes,
+                                                      down_expert_bytes,
+                                                      down_row_bytes,
+                                                      slot_count,
+                                                      (uint32_t)layer->ffn_gate_exps->dim[0],
+                                                      (uint32_t)layer->ffn_down_exps->dim[0],
+                                                      (uint32_t)layer->ffn_down_exps->dim[1],
+                                                      selected_gpu,
+                                                      g->router_weights,
+                                                      DS4_N_EXPERT_USED,
+                                                      DS4_SWIGLU_CLAMP_EXP,
+                                                      g->ffn_norm) != 0;
 
 cleanup:
-    if (selected_gpu &&
-        selected_gpu != g->flashmoe_selected_gpu &&
-        selected_gpu != g->flashmoe_decode_selected_gpu[il]) {
-        ds4_gpu_tensor_free(selected_gpu);
-    }
-    if (down_w &&
-        down_w != g->flashmoe_down_w &&
-        down_w != g->flashmoe_decode_down_w[il]) {
-        ds4_gpu_tensor_free(down_w);
-    }
-    if (up_w &&
-        up_w != g->flashmoe_up_w &&
-        up_w != g->flashmoe_decode_up_w[il]) {
-        ds4_gpu_tensor_free(up_w);
-    }
-    if (gate_w &&
-        gate_w != g->flashmoe_gate_w &&
-        gate_w != g->flashmoe_decode_gate_w[il]) {
-        ds4_gpu_tensor_free(gate_w);
-    }
-    flashmoe_selected_pack_free(&pack);
     return ok;
 }
 
@@ -9449,9 +9529,9 @@ static void metal_graph_free(ds4_gpu_graph *g) {
     free(g->flashmoe_selected_host);
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->flashmoe_decode_selected_gpu[il]);
-        ds4_gpu_tensor_free(g->flashmoe_decode_down_w[il]);
-        ds4_gpu_tensor_free(g->flashmoe_decode_up_w[il]);
-        ds4_gpu_tensor_free(g->flashmoe_decode_gate_w[il]);
+        ds4_gpu_tensor_free(g->flashmoe_decode_down_slots[il]);
+        ds4_gpu_tensor_free(g->flashmoe_decode_up_slots[il]);
+        ds4_gpu_tensor_free(g->flashmoe_decode_gate_slots[il]);
     }
     ds4_gpu_tensor_free(g->directional_steering_dirs);
     ds4_gpu_tensor_free(g->batch_ffn_out);
@@ -9861,17 +9941,19 @@ static bool metal_graph_alloc_raw_cap(
         const uint64_t up_exp_bytes = up_rb * l->ffn_up_exps->dim[1];
         const uint64_t down_exp_bytes = down_rb * l->ffn_down_exps->dim[1];
         if (flashmoe_decode_gpu_cache_enabled()) {
-            g->flashmoe_decode_gate_w[il] =
-                    ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * gate_exp_bytes);
-            g->flashmoe_decode_up_w[il] =
-                    ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * up_exp_bytes);
-            g->flashmoe_decode_down_w[il] =
-                    ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * down_exp_bytes);
+            const uint32_t decode_slots = flashmoe_decode_slot_count();
+            g->flashmoe_decode_gate_slots[il] =
+                    ds4_gpu_tensor_alloc((uint64_t)decode_slots * gate_exp_bytes);
+            g->flashmoe_decode_up_slots[il] =
+                    ds4_gpu_tensor_alloc((uint64_t)decode_slots * up_exp_bytes);
+            g->flashmoe_decode_down_slots[il] =
+                    ds4_gpu_tensor_alloc((uint64_t)decode_slots * down_exp_bytes);
             g->flashmoe_decode_selected_gpu[il] =
                     ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t));
-            g->flashmoe_decode_valid[il] = false;
-            for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-                g->flashmoe_decode_selected[il][i] = -1;
+            g->flashmoe_decode_next_slot[il] = 0;
+            for (uint32_t i = 0; i < DS4_FLASHMOE_DECODE_SLOT_CAP; i++) {
+                g->flashmoe_decode_slot_valid[il][i] = 0u;
+                g->flashmoe_decode_slot_expert[il][i] = -1;
             }
         }
         if ((uint64_t)DS4_N_EXPERT * gate_exp_bytes > flashmoe_gate_bytes_max) {
@@ -10066,9 +10148,9 @@ static bool metal_graph_alloc_raw_cap(
     for (uint32_t il = 0; layer_cache_ok && il < DS4_N_LAYER; il++) {
         layer_cache_ok = g->layer_raw_cache[il] != NULL;
         if (layer_cache_ok && flashmoe_decode_gpu_cache_enabled()) {
-            layer_cache_ok = g->flashmoe_decode_gate_w[il] != NULL &&
-                             g->flashmoe_decode_up_w[il] != NULL &&
-                             g->flashmoe_decode_down_w[il] != NULL &&
+            layer_cache_ok = g->flashmoe_decode_gate_slots[il] != NULL &&
+                             g->flashmoe_decode_up_slots[il] != NULL &&
+                             g->flashmoe_decode_down_slots[il] != NULL &&
                              g->flashmoe_decode_selected_gpu[il] != NULL;
         }
         const uint32_t ratio = ds4_layer_compress_ratio(il);
@@ -16720,6 +16802,13 @@ static int generate_metal_graph_raw_swa(
 
     const double prefill_s = t_prefill1 - t_prefill0;
     const double decode_s = t_decode1 - t_decode0;
+    if (flashmoe_timing_enabled() && g.flashmoe_decode_slot_used) {
+        fprintf(stderr,
+                "ds4: flashmoe decode slot summary hits=%" PRIu64 " misses=%" PRIu64 " miss_upload=%.3fms\n",
+                g.flashmoe_decode_slot_hits,
+                g.flashmoe_decode_slot_misses,
+                g.flashmoe_decode_slot_upload_s * 1000.0);
+    }
     ds4_log(stderr,
             DS4_LOG_TIMING,
             "ds4: prefill: %.2f t/s, generation: %.2f t/s\n",
