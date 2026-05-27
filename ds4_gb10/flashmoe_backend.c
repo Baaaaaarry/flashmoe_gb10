@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 static void set_err(char *err, size_t errlen, const char *msg) {
     if (err && errlen) snprintf(err, errlen, "%s", msg);
@@ -31,6 +32,16 @@ static uint64_t parse_gib_bytes(const char *s, uint64_t fallback) {
     double bytes = v * 1024.0 * 1024.0 * 1024.0;
     if (bytes > (double)UINT64_MAX) return fallback;
     return (uint64_t)bytes;
+}
+
+static uint32_t parse_u32_env(const char *name, uint32_t fallback) {
+    const char *s = getenv(name);
+    if (!s || !*s) return fallback;
+    errno = 0;
+    char *end = NULL;
+    unsigned long v = strtoul(s, &end, 10);
+    if (errno != 0 || end == s || v == 0ul || v > UINT32_MAX) return fallback;
+    return (uint32_t)v;
 }
 
 static ds4_moe_backend parse_backend_name(const char *name) {
@@ -446,6 +457,67 @@ static bool read_fully_at(int fd, uint8_t *dst, uint64_t bytes, uint64_t offset)
     return true;
 }
 
+typedef struct {
+    uint32_t start_index;
+    uint32_t run_count;
+} ds4_flashmoe_read_run;
+
+typedef struct {
+    int fd;
+    const uint16_t *expert_ids;
+    const ds4_flashmoe_read_run *runs;
+    uint32_t run_begin;
+    uint32_t run_end;
+    uint64_t expert_size;
+    uint64_t gate_bytes;
+    uint64_t up_bytes;
+    uint64_t down_bytes;
+    uint8_t *gate_dst;
+    uint8_t *up_dst;
+    uint8_t *down_dst;
+    const char *err_msg;
+} ds4_flashmoe_read_job;
+
+static void *flashmoe_read_runs_worker(void *arg) {
+    ds4_flashmoe_read_job *job = (ds4_flashmoe_read_job *)arg;
+    uint8_t *scratch = NULL;
+    uint64_t scratch_bytes = 0;
+    for (uint32_t r = job->run_begin; r < job->run_end; r++) {
+        const ds4_flashmoe_read_run *run = &job->runs[r];
+        const uint32_t run_count = run->run_count;
+        const uint64_t run_bytes = (uint64_t)run_count * job->expert_size;
+        if (run_bytes > scratch_bytes) {
+            uint8_t *new_scratch = (uint8_t *)realloc(scratch, (size_t)run_bytes);
+            if (!new_scratch) {
+                job->err_msg = "out of memory growing FlashMoE direct read buffer";
+                free(scratch);
+                return NULL;
+            }
+            scratch = new_scratch;
+            scratch_bytes = run_bytes;
+        }
+        const uint32_t start_index = run->start_index;
+        const uint64_t base = (uint64_t)job->expert_ids[start_index] * job->expert_size;
+        if (!read_fully_at(job->fd, scratch, run_bytes, base)) {
+            job->err_msg = "failed to read FlashMoE expert blob run";
+            free(scratch);
+            return NULL;
+        }
+        for (uint32_t j = 0; j < run_count; j++) {
+            const uint8_t *blob = scratch + (uint64_t)j * job->expert_size;
+            const uint32_t out_index = start_index + j;
+            uint8_t *gate_ptr = job->gate_dst + (uint64_t)out_index * job->gate_bytes;
+            uint8_t *up_ptr = job->up_dst + (uint64_t)out_index * job->up_bytes;
+            uint8_t *down_ptr = job->down_dst + (uint64_t)out_index * job->down_bytes;
+            memcpy(gate_ptr, blob, (size_t)job->gate_bytes);
+            memcpy(up_ptr, blob + job->gate_bytes, (size_t)job->up_bytes);
+            memcpy(down_ptr, blob + job->gate_bytes + job->up_bytes, (size_t)job->down_bytes);
+        }
+    }
+    free(scratch);
+    return NULL;
+}
+
 static int runtime_layer_fd(ds4_flashmoe_runtime_state *rt,
                             const ds4_flashmoe_layer_pack *layer_pack) {
     if (!rt || !rt->manifest || !rt->layer_fds || !layer_pack) return -1;
@@ -620,8 +692,6 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
     }
     const uint64_t expert_size = layer_pack->expert_size;
     int fd = -1;
-    uint8_t *scratch = NULL;
-    uint64_t scratch_bytes = 0;
     if (!prefer_cache) {
         fd = runtime_layer_fd(&g_runtime, layer_pack);
         if (fd < 0) {
@@ -629,14 +699,12 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
             return 1;
         }
     }
-    uint32_t i = 0;
-    while (i < n_experts) {
-        if (expert_ids[i] >= layer_pack->num_experts) {
-            free(scratch);
-            set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
-            return 1;
-        }
-        if (prefer_cache) {
+    if (prefer_cache) {
+        for (uint32_t i = 0; i < n_experts; i++) {
+            if (expert_ids[i] >= layer_pack->num_experts) {
+                set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
+                return 1;
+            }
             const uint8_t *blob = NULL;
             ds4_flashmoe_blob_entry *entry =
                     runtime_find_blob(&g_runtime, layer_id, expert_ids[i]);
@@ -663,45 +731,120 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
             memcpy(gate_ptr, blob, (size_t)gate_bytes);
             memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
             memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
-            i++;
-            continue;
         }
+        return 0;
+    }
+    for (uint32_t i = 0; i < n_experts; i++) {
+        if (expert_ids[i] >= layer_pack->num_experts) {
+            set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
+            return 1;
+        }
+    }
+    if (n_experts == 0) return 0;
 
+    ds4_flashmoe_read_run *runs =
+            (ds4_flashmoe_read_run *)malloc((size_t)n_experts * sizeof(runs[0]));
+    if (!runs) {
+        set_err(err, errlen, "out of memory allocating FlashMoE read runs");
+        return 1;
+    }
+    uint32_t run_count = 0;
+    uint32_t i = 0;
+    while (i < n_experts) {
         uint32_t run_end = i + 1u;
         while (run_end < n_experts &&
                expert_ids[run_end] < layer_pack->num_experts &&
                expert_ids[run_end] == (uint16_t)(expert_ids[run_end - 1] + 1u)) {
             run_end++;
         }
-        const uint32_t run_count = run_end - i;
-        const uint64_t run_bytes = (uint64_t)run_count * expert_size;
-        if (run_bytes > scratch_bytes) {
-            uint8_t *new_scratch = (uint8_t *)realloc(scratch, (size_t)run_bytes);
-            if (!new_scratch) {
-                free(scratch);
-                set_err(err, errlen, "out of memory growing FlashMoE direct read buffer");
-                return 1;
-            }
-            scratch = new_scratch;
-            scratch_bytes = run_bytes;
-        }
-        const uint64_t base = (uint64_t)expert_ids[i] * expert_size;
-        if (!read_fully_at(fd, scratch, run_bytes, base)) {
-            free(scratch);
-            set_err(err, errlen, "failed to read FlashMoE expert blob run");
-            return 1;
-        }
-        for (uint32_t j = 0; j < run_count; j++) {
-            const uint8_t *blob = scratch + (uint64_t)j * expert_size;
-            uint8_t *gate_ptr = gate_dst + (uint64_t)(i + j) * gate_bytes;
-            uint8_t *up_ptr = up_dst + (uint64_t)(i + j) * up_bytes;
-            uint8_t *down_ptr = down_dst + (uint64_t)(i + j) * down_bytes;
-            memcpy(gate_ptr, blob, (size_t)gate_bytes);
-            memcpy(up_ptr, blob + gate_bytes, (size_t)up_bytes);
-            memcpy(down_ptr, blob + gate_bytes + up_bytes, (size_t)down_bytes);
-        }
+        runs[run_count].start_index = i;
+        runs[run_count].run_count = run_end - i;
+        run_count++;
         i = run_end;
     }
-    free(scratch);
+
+    uint32_t io_threads = parse_u32_env("DS4_FLASHMOE_IO_THREADS", 4u);
+    if (io_threads > run_count) io_threads = run_count;
+    if (io_threads < 1u) io_threads = 1u;
+    if (run_count <= 1u || io_threads == 1u) {
+        ds4_flashmoe_read_job job = {
+            .fd = fd,
+            .expert_ids = expert_ids,
+            .runs = runs,
+            .run_begin = 0,
+            .run_end = run_count,
+            .expert_size = expert_size,
+            .gate_bytes = gate_bytes,
+            .up_bytes = up_bytes,
+            .down_bytes = down_bytes,
+            .gate_dst = gate_dst,
+            .up_dst = up_dst,
+            .down_dst = down_dst,
+            .err_msg = NULL,
+        };
+        flashmoe_read_runs_worker(&job);
+        if (job.err_msg) {
+            free(runs);
+            set_err(err, errlen, job.err_msg);
+            return 1;
+        }
+        free(runs);
+        return 0;
+    }
+
+    pthread_t *threads = (pthread_t *)malloc((size_t)io_threads * sizeof(threads[0]));
+    ds4_flashmoe_read_job *jobs =
+            (ds4_flashmoe_read_job *)malloc((size_t)io_threads * sizeof(jobs[0]));
+    if (!threads || !jobs) {
+        free(jobs);
+        free(threads);
+        free(runs);
+        set_err(err, errlen, "out of memory allocating FlashMoE IO workers");
+        return 1;
+    }
+    const uint32_t runs_per_thread = (run_count + io_threads - 1u) / io_threads;
+    uint32_t launched = 0;
+    for (uint32_t t = 0; t < io_threads; t++) {
+        const uint32_t begin = t * runs_per_thread;
+        if (begin >= run_count) break;
+        const uint32_t end = begin + runs_per_thread < run_count ? begin + runs_per_thread : run_count;
+        jobs[launched] = (ds4_flashmoe_read_job){
+            .fd = fd,
+            .expert_ids = expert_ids,
+            .runs = runs,
+            .run_begin = begin,
+            .run_end = end,
+            .expert_size = expert_size,
+            .gate_bytes = gate_bytes,
+            .up_bytes = up_bytes,
+            .down_bytes = down_bytes,
+            .gate_dst = gate_dst,
+            .up_dst = up_dst,
+            .down_dst = down_dst,
+            .err_msg = NULL,
+        };
+        if (pthread_create(&threads[launched], NULL, flashmoe_read_runs_worker, &jobs[launched]) != 0) {
+            set_err(err, errlen, "failed to create FlashMoE IO worker");
+            for (uint32_t j = 0; j < launched; j++) (void)pthread_join(threads[j], NULL);
+            free(jobs);
+            free(threads);
+            free(runs);
+            return 1;
+        }
+        launched++;
+    }
+    for (uint32_t t = 0; t < launched; t++) {
+        (void)pthread_join(threads[t], NULL);
+        if (jobs[t].err_msg) {
+            free(jobs);
+            free(threads);
+            free(runs);
+            set_err(err, errlen, jobs[t].err_msg);
+            return 1;
+        }
+    }
+    free(jobs);
+    free(threads);
+    free(runs);
     return 0;
 }
