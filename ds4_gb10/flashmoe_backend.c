@@ -848,3 +848,70 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
     free(runs);
     return 0;
 }
+
+int ds4_flashmoe_runtime_load_selected_blobs(uint16_t layer_id,
+                                             const uint16_t *expert_ids,
+                                             uint32_t n_experts,
+                                             bool prefer_cache,
+                                             uint8_t *blob_dst,
+                                             uint64_t expert_size,
+                                             char *err,
+                                             size_t errlen) {
+    if (!ds4_flashmoe_runtime_ready()) {
+        set_err(err, errlen, "FlashMoE runtime cache is not ready");
+        return 1;
+    }
+    const ds4_flashmoe_layer_pack *layer_pack =
+            ds4_flashmoe_manifest_find_layer(g_runtime.manifest, layer_id);
+    if (!layer_pack) {
+        set_err(err, errlen, "FlashMoE layer pack entry is missing");
+        return 1;
+    }
+    if (layer_pack->expert_size != expert_size) {
+        set_err(err, errlen, "FlashMoE layer pack expert size does not match runtime expectation");
+        return 1;
+    }
+    if (n_experts == 0) return 0;
+    if (!blob_dst) {
+        set_err(err, errlen, "FlashMoE blob destination is null");
+        return 1;
+    }
+    if (prefer_cache) {
+        for (uint32_t i = 0; i < n_experts; i++) {
+            uint64_t actual_size = 0;
+            const uint8_t *blob = ds4_flashmoe_runtime_get_blob(layer_id,
+                                                                expert_ids[i],
+                                                                expert_size,
+                                                                &actual_size,
+                                                                err,
+                                                                errlen);
+            if (!blob || actual_size != expert_size) {
+                if (err && err[0] == '\0') {
+                    set_err(err, errlen, "FlashMoE blob cache load failed");
+                }
+                return 1;
+            }
+            memcpy(blob_dst + (uint64_t)i * expert_size, blob, (size_t)expert_size);
+        }
+        return 0;
+    }
+
+    int fd = runtime_layer_fd(&g_runtime, layer_pack);
+    if (fd < 0) {
+        set_err(err, errlen, "failed to open FlashMoE layer pack");
+        return 1;
+    }
+    for (uint32_t i = 0; i < n_experts; i++) {
+        if (expert_ids[i] >= layer_pack->num_experts) {
+            set_err(err, errlen, "FlashMoE selected expert exceeds packed layer range");
+            return 1;
+        }
+        const uint64_t file_offset = (uint64_t)expert_ids[i] * expert_size;
+        ssize_t nread = pread(fd, blob_dst + (uint64_t)i * expert_size, (size_t)expert_size, (off_t)file_offset);
+        if (nread != (ssize_t)expert_size) {
+            set_err(err, errlen, "failed to read FlashMoE expert blob");
+            return 1;
+        }
+    }
+    return 0;
+}

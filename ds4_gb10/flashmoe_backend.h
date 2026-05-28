@@ -84,5 +84,13 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
                                             uint64_t down_bytes,
                                             char *err,
                                             size_t errlen);
+int ds4_flashmoe_runtime_load_selected_blobs(uint16_t layer_id,
+                                             const uint16_t *expert_ids,
+                                             uint32_t n_experts,
+                                             bool prefer_cache,
+                                             uint8_t *blob_dst,
+                                             uint64_t expert_size,
+                                             char *err,
+                                             size_t errlen);
 
 #endif
