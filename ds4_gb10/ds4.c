@@ -9390,7 +9390,7 @@ static bool flashmoe_decode_prepare_slot_cache(
         if (ds4_flashmoe_runtime_load_selected_blobs((uint16_t)il,
                                                      miss_experts,
                                                      miss_count,
-                                                     true,
+                                                     false,
                                                      g->flashmoe_blob_host,
                                                      blob_stride,
                                                      ferr,
