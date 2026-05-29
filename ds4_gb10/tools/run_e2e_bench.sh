@@ -116,8 +116,9 @@ if not m:
     sys.exit(1)
 graph_text = pathlib.Path(graph_path).read_text(encoding='utf-8', errors='replace')
 g = re.search(
-    r"total_ssd_cold=([0-9.]+) GiB\\n\\s+per-token-average: flops=([0-9.]+) GF weight=([0-9.]+) GiB act_rw=([0-9.]+) GiB kv_state=([0-9.]+) GiB",
+    r"total_ssd_cold=([0-9.]+) GiB\s+per-token-average: flops=([0-9.]+) GF weight=([0-9.]+) GiB act_rw=([0-9.]+) GiB kv_state=([0-9.]+) GiB",
     graph_text,
+    re.MULTILINE,
 )
 if not g:
     print(f"failed to parse graph profile from {graph_path}", file=sys.stderr)
