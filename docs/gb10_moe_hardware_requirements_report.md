@@ -467,8 +467,13 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 - `flashmoe_integration` 已接入：
   - routed expert 导出
   - `expert_root + manifest`
-  - runtime blob cache
-  - CPU/reference routed expert 外部 blob 读取
+  - `layer-pack v2`
+  - runtime host blob cache
+  - routed expert resident preload 剥离
+  - prefill 并行流式读
+  - prefill GPU staging 复用
+  - decode GPU `blob-slot` 常驻缓存
+  - decode kernel 直接按 `blob_slots + slot/stride` 消费 external pack
 
 - `inspect` 现在已经能打印：
   - 模型总体体积
@@ -478,31 +483,80 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 
 ### 7.2 当前还没有完成的关键点
 
-虽然 FlashMoE 控制面和 CPU 数据面已经接上，但：
+当前已经不是“控制面接上、CUDA 主路径没接上”的阶段了。  
+`FlashMoE` 现在已经真正进入了 CUDA decode / prefill 主路径，但它还没有达到原生 `ds4` 的理想 decode 性能。
 
-- **CUDA graph 主路径仍然主要吃 ds4 原生 GGUF resident routed expert tensor**
+当前已经验证成立的关键事实是：
 
-所以当前在 GB10 上看到的：
+- routed experts 已经从原生 resident 路径中剥离
+- 常驻内存显著下降到约 `42 GiB` 量级
+- prefill 已经稳定到约 `9 t/s`
+- decode 在 direct `blob-slot` 路径下，热启动可到约 `7.4 t/s`
 
-- 内存占用和 upstream 相近
-- 性能和 upstream 相近
+但当前也已经验证出新的主瓶颈：
 
-这是正常的。它说明：
+- **冷启动性能高度受 layer-pack 读取影响**
+- **热启动 decode 的主瓶颈已经从 H2D 转移到 `host_pack`**
+- `router_readback` 仍然是 decode 的固定成本
 
-- FlashMoE 还没有真正进入 CUDA 主通路
+也就是说，当前瓶颈已经不再是：
 
-### 7.3 下一步真正决定成败的事
+- routed expert 是否还在 GGUF resident path
+- 或 H2D `gate/up/down` 整组上传
 
-如果后续目标是“在保持正确性的前提下，进一步降低 resident memory 并提升性能上限”，下一步重点必须是：
+而是：
 
-1. **让 CUDA routed expert kernel 支持 FlashMoE 外部 blob 数据源**
-2. **在 FlashMoE backend 下，将 routed experts 排除出 startup resident cache**
-3. **测命中率、冷 miss 比例、SSD 带宽需求**
+- miss expert 的 host 侧组织成本
+- 冷态 `SSD -> page cache` 的 direct-read 成本
 
-只有做到这三步，才能真正验证：
+### 7.3 当前实测口径
 
-- `FlashMoE` 是否能在 `ds4` 主图上带来实质性的内存收益
-- 以及这种收益会不会被 I/O 代价抵消
+在 direct `blob-slot` 路径下，当前应明确区分冷启动与热启动：
+
+- 冷启动：
+  - `prefill: 2.36 t/s`
+  - `decode: 3.35 t/s`
+  - `prefill read ≈ 5616 ms`
+  - `decode host_pack ≈ 1744 ms`
+
+- 热启动：
+  - `prefill: 8.87 t/s`
+  - `decode: 7.42 t/s`
+  - `prefill read ≈ 633 ms`
+  - `decode host_pack ≈ 435 ms`
+
+这组数据说明：
+
+- 命中率并没有显著变化
+- 性能跃迁主要来自：
+  - OS page cache 预热
+  - GPU slot cache 的热专家复用
+
+所以当前 `FlashMoE` 路线已经形成两档性能口径：
+
+- `cold`
+- `warm`
+
+后续任何汇报或 benchmark 都必须明确区分这两者。
+
+### 7.4 下一步真正决定成败的事
+
+如果后续目标是“在保持正确性的前提下，进一步提升 decode，并缩小冷/热差距”，下一步重点必须是：
+
+1. **继续压缩 decode 的 `host_pack`**
+   - 当前这是热启动 decode 的最大瓶颈
+   - direct `blob-slot` 已经把 `h2d_write` 压低，但没有消除 host 侧 miss expert 组织
+
+2. **继续降低冷态 layer-pack direct-read 成本**
+   - 当前冷启动 prefill 仍然主要受 `SSD / page cache` 影响
+
+3. **继续评估 slot 命中收益与容量上限**
+   - `DS4_FLASHMOE_DECODE_SLOT_COUNT` 已经支持更大 GPU slot cache
+   - 但当前实测表明：单纯扩槽位不是 decode 提升的决定性因素
+
+4. **后续再考虑 predictor / 预取**
+   - 只有在现有 direct `blob-slot` 路线稳定后，这类“提前加载 expert”的策略才值得接入
+   - 它的主要价值是进一步压 miss path，而不是替代当前 decode 主路径
 
 ---
 
@@ -512,6 +566,6 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 
 - **未量化大模型的瓶颈首先是容量，其次是带宽，最后才是算力。**
 - **`ds4` 通过“量化 + 专用格式 + 窄引擎 + 活跃专家执行”把模型从不可部署变成了可部署。**
-- **`FlashMoE` 的核心价值，是继续把 routed experts 从常驻权重集中剥离出来，用外存与热缓存换掉约 `72.6 GiB` 级的量化常驻权重压力。**
-- **这条路线是否成立，最终取决于：命中率能否足够高，以至于 SSD / I/O 开销低于它节省下来的内存与带宽收益。**
-
+- **当前 `FlashMoE` 路线已经证明：routed experts 可以从常驻权重集中剥离出来，并在 `ds4` 主图上把常驻内存压到约 `42 GiB`、把热启动 prefill / decode 分别做到约 `9 t/s` 和 `7.4 t/s`。**
+- **但这条路线的冷启动性能仍然明显受 `SSD / page cache / host_pack` 影响。**
+- **因此，`FlashMoE` 这条路线是否真正优于原生 resident 方案，最终不只取决于命中率本身，还取决于：能否把 miss path 的 host 组织成本和冷态 I/O 成本继续压低。**
