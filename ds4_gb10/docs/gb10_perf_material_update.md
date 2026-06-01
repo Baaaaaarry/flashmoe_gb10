@@ -91,23 +91,22 @@ T = Model_Size / (BW * Utilization)
 ### 标题更新
 
 ```text
-Performance Summary: PCIe 5.0 x4 (15.75 GB/s) vs PCIe 6.0 x4 (32 GB/s) NVMe
-+ ds4 on GB10 (273 GB/s / 123 TOPS)
+Performance Summary: GB10 Measured vs Next-Gen Memory/Compute Configs
 ```
 
 ### 更新表格
 
-| Scenario | PCIe 5.0 (15.75 GB/s) | PCIe 6.0 (32 GB/s) | Improvement | Bottleneck |
-|---|---:|---:|---:|---|
-| Cold Boot | 9.16 s | 4.51 s | 2.03x faster | Storage BW (I/O-bound) |
-| Prefill C=128 | 148.98 tok/s | 297.96 tok/s | 2.00x | GPU Mem BW + fixed cost |
-| Prefill C=2,048 | 396.40 tok/s | 502.55 tok/s | 1.27x | Hybrid (resident BW + compute) |
-| Decode @128 ctx | 16.12 tok/s | 28.70 tok/s | 1.78x | UMA weight bandwidth |
-| Decode @8K ctx | 14.36 tok/s | 17.39 tok/s | 1.21x | Mixed (memory + context path) |
-| Decode @128K ctx | 10.73 tok/s | 12.44 tok/s | 1.16x | Long-context KV/state + compute path |
+| Scenario | GB10 `(273/123T)` | Next-Gen A `(273/120T)` | Next-Gen B `(546/120T)` | Improvement | Bottleneck |
+|---|---:|---:|---:|---:|---|
+| Cold Boot | 9.16 s | 9.16 s | 9.16 s | same | Storage BW only (NVMe/PCIe path; UMA/compute unchanged) |
+| Prefill C=128 | 148.98 tok/s | 148.98 tok/s | 297.96 tok/s | 2.00x @ 546GB | Resident UMA BW + fixed cost |
+| Prefill C=2,048 | 396.40 tok/s | 391.02 tok/s | 502.55 tok/s | 1.27x @ 546GB | Hybrid (resident BW + compute) |
+| Decode @128 ctx | 16.12 tok/s | 16.07 tok/s | 28.70 tok/s | 1.78x @ 546GB | UMA active-weight bandwidth |
+| Decode @8K ctx | 14.36 tok/s | 14.14 tok/s | 17.39 tok/s | 1.21x @ 546GB | Mixed (memory + context path) |
+| Decode @128K ctx | 10.73 tok/s | 10.55 tok/s | 12.44 tok/s | 1.16x @ 546GB | Long-context KV/state + compute path |
 
 ### 总结
 
-- Cold Boot 受 SSD/NVMe 带宽主导，升级到 PCIe 6.0 x4 近似 **2x** 提升。
-- Prefill 在小上下文下受 resident bandwidth / fixed cost 主导；长上下文下越来越偏向 context compute path。
-- Decode 在当前实现下不再受 SSD/PCIe miss 主导，而主要受 UMA/DDR 带宽与长上下文 KV/state 路径影响。
+- Cold Boot 只受 NVMe/PCIe 存储路径影响，与 `273/120T` 或 `546/120T` 运行态配置无关。
+- Prefill 小上下文对 546 GB/s 带宽最敏感；到 `C=2048` 后已经进入带宽与上下文计算混合瓶颈。
+- Decode 在当前实现下不再受 SSD/PCIe miss 主导，而主要受 UMA/DDR 带宽与长上下文 KV/state 路径影响；546 GB/s 对短上下文收益明显，对长上下文收益收敛。
