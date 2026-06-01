@@ -120,18 +120,40 @@ for prompt_tokens in "$@"; do
   ncu_status="ok"
   parse_status="ok"
   : >"$raw_csv"
+  full_metrics="dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum"
+  fallback_metrics="dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum"
   if ! ncu \
     --target-processes all \
     --force-overwrite \
     --page raw \
     --csv \
     --metrics \
-dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum \
+    "$full_metrics" \
     -o "$rep_base" \
     "${cmd[@]}" >"$ncu_stdout" 2>"$ncu_stderr"; then
-    ncu_status="profile_failed"
+    if ! ncu \
+      --target-processes all \
+      --force-overwrite \
+      --page raw \
+      --csv \
+      --metrics \
+      "$fallback_metrics" \
+      -o "$rep_base" \
+      "${cmd[@]}" >>"$ncu_stdout" 2>>"$ncu_stderr"; then
+      ncu_status="profile_failed"
+    else
+      ncu_status="fallback_metrics"
+    fi
   elif ! ncu --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
     ncu_status="import_failed"
+  else
+    ncu_status="full_metrics"
+  fi
+
+  if [[ "$ncu_status" == "fallback_metrics" ]]; then
+    if ! ncu --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
+      ncu_status="import_failed"
+    fi
   fi
 
   python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" <<'PY'
@@ -165,6 +187,8 @@ if pathlib.Path(raw_csv).exists() and pathlib.Path(raw_csv).stat().st_size > 0:
 else:
     if ncu_status == "ok":
         parse_status = "empty_raw_csv"
+    else:
+        parse_status = "skipped"
 with open(out_csv, "a", newline="", encoding="utf-8") as fp:
     w = csv.writer(fp)
     w.writerow([
