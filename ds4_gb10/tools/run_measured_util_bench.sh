@@ -20,6 +20,13 @@ Environment:
   DS4_UTIL_EXTRA_ARGS      Extra ds4 CLI args appended to every run
   DS4_UTIL_MEM_BW_GIBS     Peak UMA bandwidth for reference. Default: 273
   DS4_UTIL_COMPUTE_PEAK_TF Peak compute throughput for reference. Default: 123
+  DS4_UTIL_NCU_BIN         Nsight Compute binary. Default: /usr/local/cuda/bin/ncu
+  DS4_UTIL_NCU_USE_SUDO    Use sudo -E for ncu. Default: 0
+  DS4_UTIL_NCU_NVTX_INCLUDE
+                           Optional NVTX include filter, passed with --nvtx.
+  DS4_UTIL_NCU_KERNEL      Optional kernel filter, passed with -k.
+  DS4_UTIL_NCU_COUNT       ncu -c count. Default: 10
+  DS4_UTIL_NCU_SKIP        ncu -s skip. Default: 8
 EOF
   exit 2
 fi
@@ -34,13 +41,19 @@ CTX_MARGIN=${DS4_UTIL_CTX_MARGIN:-16}
 EXTRA_ARGS_STR=${DS4_UTIL_EXTRA_ARGS:-}
 MEM_BW_GIBS=${DS4_UTIL_MEM_BW_GIBS:-273}
 COMPUTE_PEAK_TF=${DS4_UTIL_COMPUTE_PEAK_TF:-123}
+NCU_BIN=${DS4_UTIL_NCU_BIN:-/usr/local/cuda/bin/ncu}
+NCU_USE_SUDO=${DS4_UTIL_NCU_USE_SUDO:-0}
+NCU_NVTX_INCLUDE=${DS4_UTIL_NCU_NVTX_INCLUDE:-}
+NCU_KERNEL=${DS4_UTIL_NCU_KERNEL:-}
+NCU_COUNT=${DS4_UTIL_NCU_COUNT:-10}
+NCU_SKIP=${DS4_UTIL_NCU_SKIP:-8}
 
 if [[ $# -eq 0 ]]; then
   set -- 128 256 512 1024 2048 4096 8192 65536 131072
 fi
 
-if ! command -v ncu >/dev/null 2>&1; then
-  echo "missing ncu in PATH" >&2
+if [[ ! -x "$NCU_BIN" ]] && ! command -v "$NCU_BIN" >/dev/null 2>&1; then
+  echo "missing ncu binary: $NCU_BIN" >&2
   exit 1
 fi
 
@@ -72,6 +85,42 @@ line = open(sys.argv[1], 'r', encoding='utf-8').readline().strip()
 tokens = ast.literal_eval(line)
 print(len(tokens))
 PY
+}
+
+run_ncu_profile() {
+  local rep_base=$1
+  local stdout_log=$2
+  local stderr_log=$3
+  shift 3
+  local -a target_cmd=( "$@" )
+  local -a ncu_cmd=()
+  if [[ "$NCU_USE_SUDO" == "1" ]]; then
+    ncu_cmd+=( sudo -E )
+  fi
+  ncu_cmd+=(
+    "$NCU_BIN"
+    --target-processes all
+    --force-overwrite
+  )
+  if [[ -n "$NCU_NVTX_INCLUDE" ]]; then
+    ncu_cmd+=( --nvtx --nvtx-include "$NCU_NVTX_INCLUDE" )
+  fi
+  ncu_cmd+=(
+    --section SpeedOfLight
+    --section MemoryWorkloadAnalysis
+    --section MemoryWorkloadAnalysis_Chart
+    --section MemoryWorkloadAnalysis_Tables
+    --section ComputeWorkloadAnalysis
+    --section InstructionStats
+    --section SpeedOfLight_HierarchicalHalfRooflineChart
+    --section SpeedOfLight_HierarchicalTensorRooflineChart
+    --section SpeedOfLight_RooflineChart
+  )
+  if [[ -n "$NCU_KERNEL" ]]; then
+    ncu_cmd+=( -k "$NCU_KERNEL" )
+  fi
+  ncu_cmd+=( -c "$NCU_COUNT" -s "$NCU_SKIP" -o "$rep_base" )
+  "${ncu_cmd[@]}" "${target_cmd[@]}" >"$stdout_log" 2>"$stderr_log"
 }
 
 TOTAL_TOKENS=$(count_prompt_tokens "$ART_DIR/prompt_tokens.txt")
@@ -138,36 +187,32 @@ for prompt_tokens in "$@"; do
   : >"$raw_csv"
   full_metrics="dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum"
   fallback_metrics="dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum"
-  if ! ncu \
-    --target-processes all \
-    --force-overwrite \
-    --page raw \
-    --csv \
-    --metrics \
-    "$full_metrics" \
-    -o "$rep_base" \
-    "${cmd[@]}" >"$ncu_stdout" 2>"$ncu_stderr"; then
-    if ! ncu \
-      --target-processes all \
-      --force-overwrite \
-      --page raw \
-      --csv \
-      --metrics \
-      "$fallback_metrics" \
-      -o "$rep_base" \
-      "${cmd[@]}" >>"$ncu_stdout" 2>>"$ncu_stderr"; then
+  if ! run_ncu_profile "$rep_base" "$ncu_stdout" "$ncu_stderr" "${cmd[@]}"; then
+    if [[ "$NCU_USE_SUDO" == "1" ]]; then
       ncu_status="profile_failed"
     else
-      ncu_status="fallback_metrics"
+      if ! "$NCU_BIN" \
+        --target-processes all \
+        --force-overwrite \
+        --page raw \
+        --csv \
+        --metrics \
+        "$fallback_metrics" \
+        -o "$rep_base" \
+        "${cmd[@]}" >>"$ncu_stdout" 2>>"$ncu_stderr"; then
+        ncu_status="profile_failed"
+      else
+        ncu_status="fallback_metrics"
+      fi
     fi
-  elif ! ncu --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
+  elif ! "$NCU_BIN" --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
     ncu_status="import_failed"
   else
-    ncu_status="full_metrics"
+    ncu_status="sections"
   fi
 
   if [[ "$ncu_status" == "fallback_metrics" ]]; then
-    if ! ncu --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
+    if ! "$NCU_BIN" --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
       ncu_status="import_failed"
     fi
   fi
