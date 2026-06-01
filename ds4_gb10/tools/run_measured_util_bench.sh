@@ -5,10 +5,10 @@ if [[ $# -lt 2 ]]; then
   cat >&2 <<'EOF'
 usage: run_measured_util_bench.sh MODEL.gguf OUT.csv [prompt_token_count ...]
 
-Runs ds4 prefill-only sweeps and records:
-  - real prefill throughput from a normal run
-  - measured DRAM utilization proxy from Nsight Compute
-  - measured MAC utilization proxy from Nsight Compute
+Runs ds4 full-generation sweeps and records per-phase metrics:
+  - real prefill throughput from the prompt processing phase
+  - real generation throughput from the decode phase
+  - measured DRAM/GPU utilization proxies split into prefill and decode windows
 
 Requirements:
   - ncu available in PATH
@@ -18,9 +18,11 @@ Environment:
   DS4_UTIL_BACKEND         cuda|metal|cpu. Default: cuda
   DS4_UTIL_CTX_MARGIN      Extra ctx slots beyond prompt+1. Default: 16
   DS4_UTIL_EXTRA_ARGS      Extra ds4 CLI args appended to every run
+  DS4_UTIL_GEN_TOKENS      Number of generated tokens. Default: 128
   DS4_UTIL_MEM_BW_GIBS     Peak UMA bandwidth for reference. Default: 273
   DS4_UTIL_COMPUTE_PEAK_TF Peak compute throughput for reference. Default: 123
   DS4_UTIL_NCU_BIN         Nsight Compute binary. Default: /usr/local/cuda/bin/ncu
+  DS4_UTIL_USE_NCU         Try Nsight Compute collection. Default: 0
   DS4_UTIL_NCU_USE_SUDO    Use sudo -E for ncu. Default: 0
   DS4_UTIL_NCU_NVTX_INCLUDE
                            Optional NVTX include filter, passed with --nvtx.
@@ -37,11 +39,13 @@ shift 2
 
 PROMPT_FILE=${DS4_UTIL_PROMPT_FILE:-tests/long_context_story_prompt.txt}
 BACKEND=${DS4_UTIL_BACKEND:-cuda}
+GEN_TOKENS=${DS4_UTIL_GEN_TOKENS:-128}
 CTX_MARGIN=${DS4_UTIL_CTX_MARGIN:-16}
 EXTRA_ARGS_STR=${DS4_UTIL_EXTRA_ARGS:-}
 MEM_BW_GIBS=${DS4_UTIL_MEM_BW_GIBS:-273}
 COMPUTE_PEAK_TF=${DS4_UTIL_COMPUTE_PEAK_TF:-123}
 NCU_BIN=${DS4_UTIL_NCU_BIN:-/usr/local/cuda/bin/ncu}
+USE_NCU=${DS4_UTIL_USE_NCU:-0}
 NCU_USE_SUDO=${DS4_UTIL_NCU_USE_SUDO:-0}
 NCU_NVTX_INCLUDE=${DS4_UTIL_NCU_NVTX_INCLUDE:-}
 NCU_KERNEL=${DS4_UTIL_NCU_KERNEL:-}
@@ -52,7 +56,7 @@ if [[ $# -eq 0 ]]; then
   set -- 128 256 512 1024 2048 4096 8192 65536 131072
 fi
 
-if [[ ! -x "$NCU_BIN" ]] && ! command -v "$NCU_BIN" >/dev/null 2>&1; then
+if [[ "$USE_NCU" == "1" ]] && [[ ! -x "$NCU_BIN" ]] && ! command -v "$NCU_BIN" >/dev/null 2>&1; then
   echo "missing ncu binary: $NCU_BIN" >&2
   exit 1
 fi
@@ -75,6 +79,13 @@ fi
 mkdir -p "$(dirname "$OUT_CSV")"
 ART_DIR="${OUT_CSV%.csv}.artifacts"
 mkdir -p "$ART_DIR"
+LOCK_DIR="$(dirname "$OUT_CSV")/locks"
+mkdir -p "$LOCK_DIR"
+
+if [[ -z "${DS4_LOCK_FILE:-}" ]]; then
+  export DS4_LOCK_FILE="$LOCK_DIR/ds4_${USER}_$$.lock"
+fi
+rm -f "$DS4_LOCK_FILE"
 
 count_prompt_tokens() {
   local dump_file=$1
@@ -133,7 +144,7 @@ if (( TOTAL_TOKENS < MAX_REQ )); then
   exit 1
 fi
 
-printf "prompt_tokens,ctx_alloc,prefill_tps,prefill_s,eta_mem_pct,eta_mac_pct,util_source,mac_metric,dram_read_gib,dram_write_gib,gpu_util_proxy_pct,gpu_mem_util_proxy_pct,mem_bw_gibs_ref,compute_peak_tf_ref,ncu_status,parse_status,stderr_log,ncu_stderr_log,nvidia_smi_log,ncu_raw_csv,ncu_rep\n" >"$OUT_CSV"
+printf "prompt_tokens,gen_tokens,ctx_alloc,prefill_tps,generation_tps,prefill_s,decode_s,prefill_eta_mem_pct,prefill_eta_mac_pct,decode_eta_mem_pct,decode_eta_mac_pct,util_source,prefill_mac_metric,decode_mac_metric,dram_read_gib,dram_write_gib,prefill_gpu_util_proxy_pct,prefill_gpu_mem_util_proxy_pct,decode_gpu_util_proxy_pct,decode_gpu_mem_util_proxy_pct,mem_bw_gibs_ref,compute_peak_tf_ref,ncu_status,parse_status,stderr_log,ncu_stderr_log,nvidia_smi_log,ncu_raw_csv,ncu_rep\n" >"$OUT_CSV"
 
 for prompt_tokens in "$@"; do
   ctx_alloc=$((prompt_tokens + 1 + CTX_MARGIN))
@@ -154,7 +165,7 @@ for prompt_tokens in "$@"; do
     --ctx "$ctx_alloc"
     --nothink
     --temp 0
-    --prefill-only
+    -n "$GEN_TOKENS"
     --prompt-file "$PROMPT_FILE"
     --prompt-token-limit "$prompt_tokens"
   )
@@ -175,61 +186,84 @@ for prompt_tokens in "$@"; do
     smi_pid=$!
   fi
 
+  run_t0=$(python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+)
+
   "${cmd[@]}" >"$stdout_log" 2>"$stderr_log"
+
+  run_t1=$(python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+)
 
   if [[ -n "$smi_pid" ]]; then
     kill "$smi_pid" >/dev/null 2>&1 || true
     wait "$smi_pid" 2>/dev/null || true
   fi
 
-  ncu_status="ok"
+  ncu_status="disabled"
   parse_status="ok"
   : >"$raw_csv"
   full_metrics="dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum"
   fallback_metrics="dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum"
-  if ! run_ncu_profile "$rep_base" "$ncu_stdout" "$ncu_stderr" "${cmd[@]}"; then
-    if [[ "$NCU_USE_SUDO" == "1" ]]; then
-      ncu_status="profile_failed"
-    else
-      if ! "$NCU_BIN" \
-        --target-processes all \
-        --force-overwrite \
-        --page raw \
-        --csv \
-        --metrics \
-        "$fallback_metrics" \
-        -o "$rep_base" \
-        "${cmd[@]}" >>"$ncu_stdout" 2>>"$ncu_stderr"; then
+  if [[ "$USE_NCU" == "1" ]]; then
+    ncu_status="ok"
+    if ! run_ncu_profile "$rep_base" "$ncu_stdout" "$ncu_stderr" "${cmd[@]}"; then
+      if [[ "$NCU_USE_SUDO" == "1" ]]; then
         ncu_status="profile_failed"
       else
-        ncu_status="fallback_metrics"
+        if ! "$NCU_BIN" \
+          --target-processes all \
+          --force-overwrite \
+          --page raw \
+          --csv \
+          --metrics \
+          "$fallback_metrics" \
+          -o "$rep_base" \
+          "${cmd[@]}" >>"$ncu_stdout" 2>>"$ncu_stderr"; then
+          ncu_status="profile_failed"
+        else
+          ncu_status="fallback_metrics"
+        fi
+      fi
+    elif ! "$NCU_BIN" --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
+      ncu_status="import_failed"
+    else
+      ncu_status="sections"
+    fi
+
+    if [[ "$ncu_status" == "fallback_metrics" ]]; then
+      if ! "$NCU_BIN" --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
+        ncu_status="import_failed"
       fi
     fi
-  elif ! "$NCU_BIN" --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
-    ncu_status="import_failed"
-  else
-    ncu_status="sections"
   fi
 
-  if [[ "$ncu_status" == "fallback_metrics" ]]; then
-    if ! "$NCU_BIN" --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
-      ncu_status="import_failed"
-    fi
-  fi
-
-  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$smi_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" <<'PY'
+  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$GEN_TOKENS" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$smi_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" "$run_t0" "$run_t1" <<'PY'
 import csv, json, pathlib, re, subprocess, sys
-stderr_path, raw_csv, out_csv, prompt_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, smi_log, raw_csv_log, rep_file, ncu_status, parse_status = sys.argv[1:]
+from datetime import datetime
+stderr_path, raw_csv, out_csv, prompt_tokens, gen_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, smi_log, raw_csv_log, rep_file, ncu_status, parse_status, run_t0, run_t1 = sys.argv[1:]
 text = pathlib.Path(stderr_path).read_text(encoding='utf-8', errors='replace')
-m = re.search(r"ds4: prefill-only: ([0-9.]+) t/s", text)
-if not m:
-    m = re.search(r"ds4: prefill: ([0-9.]+) t/s", text)
-if not m:
-    print(f"failed to parse prefill throughput from {stderr_path}", file=sys.stderr)
+prefill_m = re.search(r"ds4: prefill: ([0-9.]+) t/s, generation: ([0-9.]+) t/s", text)
+if not prefill_m:
+    prefill_m = re.search(r"ds4: prefill-only: ([0-9.]+) t/s", text)
+if not prefill_m:
+    print(f"failed to parse throughput from {stderr_path}", file=sys.stderr)
     sys.exit(1)
-prefill_tps = float(m.group(1))
+if len(prefill_m.groups()) == 2:
+    prefill_tps = float(prefill_m.group(1))
+    generation_tps = float(prefill_m.group(2))
+else:
+    prefill_tps = float(prefill_m.group(1))
+    generation_tps = 0.0
 prompt_tokens_i = int(prompt_tokens)
+gen_tokens_i = int(gen_tokens)
 prefill_s = prompt_tokens_i / prefill_tps if prefill_tps > 0 else 0.0
+decode_s = gen_tokens_i / generation_tps if generation_tps > 0 else 0.0
 parsed = {
     "eta_mem_pct": "",
     "eta_mac_pct": "",
@@ -254,57 +288,127 @@ else:
     else:
         parse_status = "skipped"
 
-def parse_smi_proxy(path):
-    vals_gpu = []
-    vals_mem = []
+def parse_smi_time(s):
+    s = s.strip()
+    for fmt in ("%Y/%m/%d %H:%M:%S.%f", "%Y/%m/%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).timestamp()
+        except Exception:
+            pass
+    return None
+
+def parse_smi_proxy(path, prefill_t0, prefill_t1, decode_t1):
+    pre_gpu = []
+    pre_mem = []
+    dec_gpu = []
+    dec_mem = []
     p = pathlib.Path(path)
     if not p.exists() or p.stat().st_size == 0:
-        return None, None
+        return None
     for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = [x.strip() for x in line.split(",")]
         if len(parts) < 3:
             continue
         try:
-            vals_gpu.append(float(parts[1]))
-            vals_mem.append(float(parts[2]))
+            ts = parse_smi_time(parts[0])
+            gpu = float(parts[1])
+            mem = float(parts[2])
         except Exception:
             continue
-    if not vals_gpu:
-        return None, None
-    return sum(vals_gpu) / len(vals_gpu), sum(vals_mem) / len(vals_mem)
+        if ts is None:
+            continue
+        if prefill_t0 <= ts <= prefill_t1:
+            pre_gpu.append(gpu)
+            pre_mem.append(mem)
+        elif prefill_t1 < ts <= decode_t1:
+            dec_gpu.append(gpu)
+            dec_mem.append(mem)
+    def avg(xs):
+        return sum(xs) / len(xs) if xs else None
+    return {
+        "prefill_gpu": avg(pre_gpu),
+        "prefill_mem": avg(pre_mem),
+        "decode_gpu": avg(dec_gpu),
+        "decode_mem": avg(dec_mem),
+    }
 
-gpu_util_proxy, gpu_mem_util_proxy = parse_smi_proxy(smi_log)
-if gpu_util_proxy is not None:
-    parsed["gpu_util_proxy_pct"] = gpu_util_proxy
-if gpu_mem_util_proxy is not None:
-    parsed["gpu_mem_util_proxy_pct"] = gpu_mem_util_proxy
+run_t0_f = float(run_t0)
+run_t1_f = float(run_t1)
+prefill_t0 = run_t0_f
+prefill_t1 = min(run_t0_f + prefill_s, run_t1_f)
+decode_t1 = min(prefill_t1 + decode_s, run_t1_f)
+smi = parse_smi_proxy(smi_log, prefill_t0, prefill_t1, decode_t1)
 
-if not parsed.get("eta_mem_pct") and ncu_status == "profile_failed":
+prefill_gpu_util_proxy = ""
+prefill_gpu_mem_util_proxy = ""
+decode_gpu_util_proxy = ""
+decode_gpu_mem_util_proxy = ""
+prefill_eta_mem = parsed.get("eta_mem_pct", "")
+prefill_eta_mac = parsed.get("eta_mac_pct", "")
+decode_eta_mem = ""
+decode_eta_mac = ""
+prefill_mac_metric = parsed.get("mac_metric", "")
+decode_mac_metric = ""
+
+if smi:
+    if smi["prefill_gpu"] is not None:
+        prefill_gpu_util_proxy = smi["prefill_gpu"]
+    if smi["prefill_mem"] is not None:
+        prefill_gpu_mem_util_proxy = smi["prefill_mem"]
+    if smi["decode_gpu"] is not None:
+        decode_gpu_util_proxy = smi["decode_gpu"]
+    if smi["decode_mem"] is not None:
+        decode_gpu_mem_util_proxy = smi["decode_mem"]
+
+if not prefill_eta_mem and ncu_status == "profile_failed":
     ncu_err = pathlib.Path(ncu_stderr_log).read_text(encoding="utf-8", errors="replace")
-    if "ERR_NVGPUCTRPERM" in ncu_err and gpu_util_proxy is not None:
-        parsed["eta_mac_pct"] = gpu_util_proxy
-        parsed["eta_mem_pct"] = gpu_mem_util_proxy if gpu_mem_util_proxy is not None else ""
+    if "ERR_NVGPUCTRPERM" in ncu_err and smi:
+        prefill_eta_mac = prefill_gpu_util_proxy if prefill_gpu_util_proxy != "" else ""
+        prefill_eta_mem = prefill_gpu_mem_util_proxy if prefill_gpu_mem_util_proxy != "" else ""
+        decode_eta_mac = decode_gpu_util_proxy if decode_gpu_util_proxy != "" else ""
+        decode_eta_mem = decode_gpu_mem_util_proxy if decode_gpu_mem_util_proxy != "" else ""
         parsed["util_source"] = "nvidia-smi-proxy"
-        parsed["mac_metric"] = "gpu_util_pct_proxy"
+        prefill_mac_metric = "gpu_util_pct_proxy"
+        decode_mac_metric = "gpu_util_pct_proxy"
         parse_status = "proxy_fallback"
+elif not prefill_eta_mem and ncu_status == "disabled" and smi:
+    prefill_eta_mac = prefill_gpu_util_proxy if prefill_gpu_util_proxy != "" else ""
+    prefill_eta_mem = prefill_gpu_mem_util_proxy if prefill_gpu_mem_util_proxy != "" else ""
+    decode_eta_mac = decode_gpu_util_proxy if decode_gpu_util_proxy != "" else ""
+    decode_eta_mem = decode_gpu_mem_util_proxy if decode_gpu_mem_util_proxy != "" else ""
+    parsed["util_source"] = "nvidia-smi-proxy"
+    prefill_mac_metric = "gpu_util_pct_proxy"
+    decode_mac_metric = "gpu_util_pct_proxy"
+    parse_status = "proxy_only"
 elif parsed.get("eta_mem_pct") or parsed.get("eta_mac_pct"):
     parsed["util_source"] = "ncu"
+    prefill_eta_mem = parsed.get("eta_mem_pct", "")
+    prefill_eta_mac = parsed.get("eta_mac_pct", "")
+    prefill_mac_metric = parsed.get("mac_metric", "")
 
 with open(out_csv, "a", newline="", encoding="utf-8") as fp:
     w = csv.writer(fp)
     w.writerow([
         prompt_tokens_i,
+        gen_tokens_i,
         int(ctx_alloc),
         prefill_tps,
+        generation_tps,
         prefill_s,
-        parsed.get("eta_mem_pct", ""),
-        parsed.get("eta_mac_pct", ""),
+        decode_s,
+        prefill_eta_mem,
+        prefill_eta_mac,
+        decode_eta_mem,
+        decode_eta_mac,
         parsed.get("util_source", ""),
-        parsed.get("mac_metric", ""),
+        prefill_mac_metric,
+        decode_mac_metric,
         (parsed.get("dram_read_bytes", 0.0) or 0.0) / (1024 ** 3),
         (parsed.get("dram_write_bytes", 0.0) or 0.0) / (1024 ** 3),
-        parsed.get("gpu_util_proxy_pct", ""),
-        parsed.get("gpu_mem_util_proxy_pct", ""),
+        prefill_gpu_util_proxy,
+        prefill_gpu_mem_util_proxy,
+        decode_gpu_util_proxy,
+        decode_gpu_mem_util_proxy,
         float(mem_bw_gibs),
         float(compute_peak_tf),
         ncu_status,
