@@ -147,6 +147,12 @@ for v in "$@"; do
   if (( v > MAX_REQ )); then MAX_REQ=$v; fi
 done
 if (( TOTAL_TOKENS < MAX_REQ )); then
+  if [[ -f tests/generate_long_context_story_prompt.py ]]; then
+    python3 tests/generate_long_context_story_prompt.py --min-tokens "$MAX_REQ" --output "$PROMPT_FILE"
+    TOTAL_TOKENS=$(count_prompt_tokens "$ART_DIR/prompt_tokens.txt")
+  fi
+fi
+if (( TOTAL_TOKENS < MAX_REQ )); then
   echo "prompt corpus only has ${TOTAL_TOKENS} tokens, need at least ${MAX_REQ}" >&2
   exit 1
 fi

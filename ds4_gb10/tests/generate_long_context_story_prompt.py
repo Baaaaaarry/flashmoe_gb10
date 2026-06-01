@@ -8,6 +8,7 @@ the spelled-out numbers to digits, and emit a parseable list.
 
 from __future__ import annotations
 
+import argparse
 import random
 from pathlib import Path
 
@@ -131,13 +132,14 @@ def assignment_sentence(name: str, word: str) -> str:
     )
 
 
-def make_story() -> str:
+def make_story(scene_repeats: int = 1) -> str:
     rng = random.Random(20260513)
     names = [name for name, _, _ in FACTS]
     fact_by_scene = {7 + i * 11: fact for i, fact in enumerate(FACTS)}
     scenes: list[str] = []
 
-    for scene_index in range(190):
+    total_scenes = 190 * max(1, scene_repeats)
+    for scene_index in range(total_scenes):
         lead = rng.choice(names)
         friend = rng.choice([n for n in names if n != lead])
         template = SCENE_TEMPLATES[scene_index % len(SCENE_TEMPLATES)]
@@ -177,9 +179,25 @@ No bullets, no prose, no explanation.
     return OPENING + "\n".join(scenes) + question
 
 
+def estimate_token_like_count(text: str) -> int:
+    # For this prose-heavy fixture, tokenizer piece count is safely above raw
+    # whitespace word count. The bench script validates with ds4 --dump-tokens.
+    return len(text.split())
+
+
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--min-tokens", type=int, default=0)
+    ap.add_argument("--output", type=Path, default=None)
+    args = ap.parse_args()
+
     root = Path(__file__).resolve().parent
     story = make_story()
+    if args.min_tokens > 0:
+        repeats = 1
+        while estimate_token_like_count(story) < args.min_tokens:
+            repeats *= 2
+            story = make_story(repeats)
     rendered = (
         BOS
         + "You are a careful assistant. Read the story, remember the assignments, "
@@ -189,7 +207,8 @@ def main() -> None:
         + ASSISTANT
         + "</think>"
     )
-    (root / "long_context_story_prompt.txt").write_text(rendered, encoding="utf-8")
+    out = args.output or (root / "long_context_story_prompt.txt")
+    out.write_text(rendered, encoding="utf-8")
 
 
 if __name__ == "__main__":
