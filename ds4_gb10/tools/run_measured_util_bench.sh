@@ -154,6 +154,7 @@ for prompt_tokens in "$@"; do
   ncu_stdout="$ART_DIR/${run_name}.ncu.stdout.log"
   ncu_stderr="$ART_DIR/${run_name}.ncu.stderr.log"
   smi_log="$ART_DIR/${run_name}.nvidia-smi.log"
+  dmon_log="$ART_DIR/${run_name}.nvidia-smi.dmon.log"
   rep_base="$ART_DIR/${run_name}"
   rep_file="${rep_base}.ncu-rep"
   raw_csv="$ART_DIR/${run_name}.ncu.raw.csv"
@@ -177,13 +178,17 @@ for prompt_tokens in "$@"; do
   fi
 
   smi_pid=""
+  dmon_pid=""
   : >"$smi_log"
+  : >"$dmon_log"
   if [[ "$BACKEND" == "cuda" ]] && command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi \
       --query-gpu=timestamp,utilization.gpu,utilization.memory,clocks.current.sm,clocks.current.memory,power.draw \
       --format=csv,noheader,nounits \
       -lms 100 >"$smi_log" 2>/dev/null &
     smi_pid=$!
+    nvidia-smi dmon -s u -d 1 >"$dmon_log" 2>/dev/null &
+    dmon_pid=$!
   fi
 
   run_t0=$(python3 - <<'PY'
@@ -203,6 +208,10 @@ PY
   if [[ -n "$smi_pid" ]]; then
     kill "$smi_pid" >/dev/null 2>&1 || true
     wait "$smi_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$dmon_pid" ]]; then
+    kill "$dmon_pid" >/dev/null 2>&1 || true
+    wait "$dmon_pid" 2>/dev/null || true
   fi
 
   ncu_status="disabled"
@@ -243,10 +252,10 @@ PY
     fi
   fi
 
-  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$GEN_TOKENS" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$smi_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" "$run_t0" "$run_t1" <<'PY'
+  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$GEN_TOKENS" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$smi_log" "$dmon_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" "$run_t0" "$run_t1" <<'PY'
 import csv, json, pathlib, re, subprocess, sys
 from datetime import datetime
-stderr_path, raw_csv, out_csv, prompt_tokens, gen_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, smi_log, raw_csv_log, rep_file, ncu_status, parse_status, run_t0, run_t1 = sys.argv[1:]
+stderr_path, raw_csv, out_csv, prompt_tokens, gen_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, smi_log, dmon_log, raw_csv_log, rep_file, ncu_status, parse_status, run_t0, run_t1 = sys.argv[1:]
 text = pathlib.Path(stderr_path).read_text(encoding='utf-8', errors='replace')
 prefill_m = re.search(r"ds4: prefill: ([0-9.]+) t/s, generation: ([0-9.]+) t/s", text)
 if not prefill_m:
@@ -332,12 +341,46 @@ def parse_smi_proxy(path, prefill_t0, prefill_t1, decode_t1):
         "decode_mem": avg(dec_mem),
     }
 
+def parse_dmon_proxy(path, prefill_s, decode_s):
+    p = pathlib.Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return None
+    rows = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            gpu = float(parts[1])
+            mem = float(parts[2])
+        except Exception:
+            continue
+        rows.append((gpu, mem))
+    if not rows:
+        return None
+    pre_n = max(1, round(prefill_s)) if prefill_s > 0 else 0
+    dec_n = max(1, round(decode_s)) if decode_s > 0 else 0
+    pre = rows[:pre_n] if pre_n else []
+    dec = rows[pre_n:pre_n + dec_n] if dec_n else []
+    def avg_pairs(xs, idx):
+        return sum(v[idx] for v in xs) / len(xs) if xs else None
+    return {
+        "prefill_gpu": avg_pairs(pre, 0),
+        "prefill_mem": avg_pairs(pre, 1),
+        "decode_gpu": avg_pairs(dec, 0),
+        "decode_mem": avg_pairs(dec, 1),
+    }
+
 run_t0_f = float(run_t0)
 run_t1_f = float(run_t1)
 prefill_t0 = run_t0_f
 prefill_t1 = min(run_t0_f + prefill_s, run_t1_f)
 decode_t1 = min(prefill_t1 + decode_s, run_t1_f)
 smi = parse_smi_proxy(smi_log, prefill_t0, prefill_t1, decode_t1)
+dmon = parse_dmon_proxy(dmon_log, prefill_s, decode_s)
 
 prefill_gpu_util_proxy = ""
 prefill_gpu_mem_util_proxy = ""
@@ -359,6 +402,16 @@ if smi:
         decode_gpu_util_proxy = smi["decode_gpu"]
     if smi["decode_mem"] is not None:
         decode_gpu_mem_util_proxy = smi["decode_mem"]
+
+if dmon:
+    if prefill_gpu_util_proxy == "" and dmon["prefill_gpu"] is not None:
+        prefill_gpu_util_proxy = dmon["prefill_gpu"]
+    if (prefill_gpu_mem_util_proxy == "" or float(prefill_gpu_mem_util_proxy) == 0.0) and dmon["prefill_mem"] is not None:
+        prefill_gpu_mem_util_proxy = dmon["prefill_mem"]
+    if decode_gpu_util_proxy == "" and dmon["decode_gpu"] is not None:
+        decode_gpu_util_proxy = dmon["decode_gpu"]
+    if (decode_gpu_mem_util_proxy == "" or float(decode_gpu_mem_util_proxy) == 0.0) and dmon["decode_mem"] is not None:
+        decode_gpu_mem_util_proxy = dmon["decode_mem"]
 
 if not prefill_eta_mem and ncu_status == "profile_failed":
     ncu_err = pathlib.Path(ncu_stderr_log).read_text(encoding="utf-8", errors="replace")
