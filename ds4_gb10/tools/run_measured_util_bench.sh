@@ -21,6 +21,11 @@ Environment:
   DS4_UTIL_GEN_TOKENS      Number of generated tokens. Default: 128
   DS4_UTIL_MEM_BW_GIBS     Peak UMA bandwidth for reference. Default: 273
   DS4_UTIL_COMPUTE_PEAK_TF Peak compute throughput for reference. Default: 123
+  DS4_UTIL_PREFILL_MODEL_GIB
+                           Prefill resident-weight model per 2048-token chunk.
+                           Default: 80.76
+  DS4_UTIL_DECODE_MODEL_GIB
+                           Decode active-weight model per token. Default: 10.97
   DS4_UTIL_NCU_BIN         Nsight Compute binary. Default: /usr/local/cuda/bin/ncu
   DS4_UTIL_USE_NCU         Try Nsight Compute collection. Default: 0
   DS4_UTIL_NCU_USE_SUDO    Use sudo -E for ncu. Default: 0
@@ -44,6 +49,8 @@ CTX_MARGIN=${DS4_UTIL_CTX_MARGIN:-16}
 EXTRA_ARGS_STR=${DS4_UTIL_EXTRA_ARGS:-}
 MEM_BW_GIBS=${DS4_UTIL_MEM_BW_GIBS:-273}
 COMPUTE_PEAK_TF=${DS4_UTIL_COMPUTE_PEAK_TF:-123}
+PREFILL_MODEL_GIB=${DS4_UTIL_PREFILL_MODEL_GIB:-80.76}
+DECODE_MODEL_GIB=${DS4_UTIL_DECODE_MODEL_GIB:-10.97}
 NCU_BIN=${DS4_UTIL_NCU_BIN:-/usr/local/cuda/bin/ncu}
 USE_NCU=${DS4_UTIL_USE_NCU:-0}
 NCU_USE_SUDO=${DS4_UTIL_NCU_USE_SUDO:-0}
@@ -252,10 +259,10 @@ PY
     fi
   fi
 
-  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$GEN_TOKENS" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$smi_log" "$dmon_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" "$run_t0" "$run_t1" <<'PY'
+  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$GEN_TOKENS" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$PREFILL_MODEL_GIB" "$DECODE_MODEL_GIB" "$stderr_log" "$ncu_stderr" "$smi_log" "$dmon_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" "$run_t0" "$run_t1" <<'PY'
 import csv, json, pathlib, re, subprocess, sys
 from datetime import datetime
-stderr_path, raw_csv, out_csv, prompt_tokens, gen_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, smi_log, dmon_log, raw_csv_log, rep_file, ncu_status, parse_status, run_t0, run_t1 = sys.argv[1:]
+stderr_path, raw_csv, out_csv, prompt_tokens, gen_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, prefill_model_gib, decode_model_gib, stderr_log, ncu_stderr_log, smi_log, dmon_log, raw_csv_log, rep_file, ncu_status, parse_status, run_t0, run_t1 = sys.argv[1:]
 text = pathlib.Path(stderr_path).read_text(encoding='utf-8', errors='replace')
 prefill_m = re.search(r"ds4: prefill: ([0-9.]+) t/s, generation: ([0-9.]+) t/s", text)
 if not prefill_m:
@@ -273,6 +280,9 @@ prompt_tokens_i = int(prompt_tokens)
 gen_tokens_i = int(gen_tokens)
 prefill_s = prompt_tokens_i / prefill_tps if prefill_tps > 0 else 0.0
 decode_s = gen_tokens_i / generation_tps if generation_tps > 0 else 0.0
+mem_bw_gibs_f = float(mem_bw_gibs)
+prefill_model_gib_f = float(prefill_model_gib)
+decode_model_gib_f = float(decode_model_gib)
 parsed = {
     "eta_mem_pct": "",
     "eta_mac_pct": "",
@@ -374,6 +384,19 @@ def parse_dmon_proxy(path, prefill_s, decode_s):
         "decode_mem": avg_pairs(dec, 1),
     }
 
+def estimate_prefill_mem_util(prompt_tokens, prefill_s, mem_bw_gibs, per_chunk_gib):
+    if prefill_s <= 0 or mem_bw_gibs <= 0:
+        return ""
+    chunks = (prompt_tokens + 2048 - 1) // 2048
+    bw = (chunks * per_chunk_gib) / prefill_s
+    return 100.0 * bw / mem_bw_gibs
+
+def estimate_decode_mem_util(generation_tps, mem_bw_gibs, per_token_gib):
+    if generation_tps <= 0 or mem_bw_gibs <= 0:
+        return ""
+    bw = generation_tps * per_token_gib
+    return 100.0 * bw / mem_bw_gibs
+
 run_t0_f = float(run_t0)
 run_t1_f = float(run_t1)
 prefill_t0 = run_t0_f
@@ -413,6 +436,9 @@ if dmon:
     if (decode_gpu_mem_util_proxy == "" or float(decode_gpu_mem_util_proxy) == 0.0) and dmon["decode_mem"] is not None:
         decode_gpu_mem_util_proxy = dmon["decode_mem"]
 
+prefill_mem_missing = (prefill_gpu_mem_util_proxy == "" or float(prefill_gpu_mem_util_proxy) == 0.0)
+decode_mem_missing = (decode_gpu_mem_util_proxy == "" or float(decode_gpu_mem_util_proxy) == 0.0)
+
 if not prefill_eta_mem and ncu_status == "profile_failed":
     ncu_err = pathlib.Path(ncu_stderr_log).read_text(encoding="utf-8", errors="replace")
     if "ERR_NVGPUCTRPERM" in ncu_err and smi:
@@ -438,6 +464,24 @@ elif parsed.get("eta_mem_pct") or parsed.get("eta_mac_pct"):
     prefill_eta_mem = parsed.get("eta_mem_pct", "")
     prefill_eta_mac = parsed.get("eta_mac_pct", "")
     prefill_mac_metric = parsed.get("mac_metric", "")
+
+if prefill_eta_mem in ("", 0, 0.0, "0", "0.0"):
+    est = estimate_prefill_mem_util(prompt_tokens_i, prefill_s, mem_bw_gibs_f, prefill_model_gib_f)
+    if est != "":
+        prefill_eta_mem = est
+        if parsed.get("util_source"):
+            parsed["util_source"] += "+prefill-mem-model"
+        else:
+            parsed["util_source"] = "prefill-mem-model"
+
+if decode_eta_mem in ("", 0, 0.0, "0", "0.0"):
+    est = estimate_decode_mem_util(generation_tps, mem_bw_gibs_f, decode_model_gib_f)
+    if est != "":
+        decode_eta_mem = est
+        if parsed.get("util_source"):
+            parsed["util_source"] += "+decode-mem-model"
+        else:
+            parsed["util_source"] = "decode-mem-model"
 
 with open(out_csv, "a", newline="", encoding="utf-8") as fp:
     w = csv.writer(fp)
