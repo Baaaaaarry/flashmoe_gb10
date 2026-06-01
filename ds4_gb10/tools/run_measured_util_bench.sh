@@ -84,7 +84,7 @@ if (( TOTAL_TOKENS < MAX_REQ )); then
   exit 1
 fi
 
-printf "prompt_tokens,ctx_alloc,prefill_tps,prefill_s,eta_mem_pct,eta_mac_pct,mac_metric,dram_read_gib,dram_write_gib,mem_bw_gibs_ref,compute_peak_tf_ref,stderr_log,ncu_raw_csv,ncu_rep\n" >"$OUT_CSV"
+printf "prompt_tokens,ctx_alloc,prefill_tps,prefill_s,eta_mem_pct,eta_mac_pct,mac_metric,dram_read_gib,dram_write_gib,mem_bw_gibs_ref,compute_peak_tf_ref,ncu_status,parse_status,stderr_log,ncu_stderr_log,ncu_raw_csv,ncu_rep\n" >"$OUT_CSV"
 
 for prompt_tokens in "$@"; do
   ctx_alloc=$((prompt_tokens + 1 + CTX_MARGIN))
@@ -117,7 +117,10 @@ for prompt_tokens in "$@"; do
 
   "${cmd[@]}" >"$stdout_log" 2>"$stderr_log"
 
-  ncu \
+  ncu_status="ok"
+  parse_status="ok"
+  : >"$raw_csv"
+  if ! ncu \
     --target-processes all \
     --force-overwrite \
     --page raw \
@@ -125,13 +128,15 @@ for prompt_tokens in "$@"; do
     --metrics \
 dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__throughput.avg.pct_of_peak_sustained_elapsed,sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed,dram__bytes_read.sum,dram__bytes_write.sum \
     -o "$rep_base" \
-    "${cmd[@]}" >"$ncu_stdout" 2>"$ncu_stderr"
+    "${cmd[@]}" >"$ncu_stdout" 2>"$ncu_stderr"; then
+    ncu_status="profile_failed"
+  elif ! ncu --import "$rep_file" --csv --page raw >"$raw_csv" 2>>"$ncu_stderr"; then
+    ncu_status="import_failed"
+  fi
 
-  ncu --import "$rep_file" --csv --page raw >"$raw_csv"
-
-  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$raw_csv" "$rep_file" <<'PY'
+  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" <<'PY'
 import csv, json, pathlib, re, subprocess, sys
-stderr_path, raw_csv, out_csv, prompt_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, raw_csv_log, rep_file = sys.argv[1:]
+stderr_path, raw_csv, out_csv, prompt_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, raw_csv_log, rep_file, ncu_status, parse_status = sys.argv[1:]
 text = pathlib.Path(stderr_path).read_text(encoding='utf-8', errors='replace')
 m = re.search(r"ds4: prefill-only: ([0-9.]+) t/s", text)
 if not m:
@@ -142,10 +147,24 @@ if not m:
 prefill_tps = float(m.group(1))
 prompt_tokens_i = int(prompt_tokens)
 prefill_s = prompt_tokens_i / prefill_tps if prefill_tps > 0 else 0.0
-parsed = json.loads(subprocess.check_output(
-    [sys.executable, "tools/parse_ncu_raw_csv.py", raw_csv],
-    text=True,
-))
+parsed = {
+    "eta_mem_pct": "",
+    "eta_mac_pct": "",
+    "mac_metric": "",
+    "dram_read_bytes": 0.0,
+    "dram_write_bytes": 0.0,
+}
+if pathlib.Path(raw_csv).exists() and pathlib.Path(raw_csv).stat().st_size > 0:
+    try:
+        parsed = json.loads(subprocess.check_output(
+            [sys.executable, "tools/parse_ncu_raw_csv.py", raw_csv],
+            text=True,
+        ))
+    except Exception:
+        parse_status = "parse_failed"
+else:
+    if ncu_status == "ok":
+        parse_status = "empty_raw_csv"
 with open(out_csv, "a", newline="", encoding="utf-8") as fp:
     w = csv.writer(fp)
     w.writerow([
@@ -160,13 +179,16 @@ with open(out_csv, "a", newline="", encoding="utf-8") as fp:
         (parsed.get("dram_write_bytes", 0.0) or 0.0) / (1024 ** 3),
         float(mem_bw_gibs),
         float(compute_peak_tf),
+        ncu_status,
+        parse_status,
         stderr_log,
+        ncu_stderr_log,
         raw_csv_log,
         rep_file,
     ])
 PY
 
-  printf "done prompt_tokens=%s ctx_alloc=%s\n" "$prompt_tokens" "$ctx_alloc"
+  printf "done prompt_tokens=%s ctx_alloc=%s ncu_status=%s\n" "$prompt_tokens" "$ctx_alloc" "$ncu_status"
 done
 
 echo "wrote $OUT_CSV"
