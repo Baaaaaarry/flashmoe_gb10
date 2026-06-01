@@ -84,7 +84,7 @@ if (( TOTAL_TOKENS < MAX_REQ )); then
   exit 1
 fi
 
-printf "prompt_tokens,ctx_alloc,prefill_tps,prefill_s,eta_mem_pct,eta_mac_pct,mac_metric,dram_read_gib,dram_write_gib,mem_bw_gibs_ref,compute_peak_tf_ref,ncu_status,parse_status,stderr_log,ncu_stderr_log,ncu_raw_csv,ncu_rep\n" >"$OUT_CSV"
+printf "prompt_tokens,ctx_alloc,prefill_tps,prefill_s,eta_mem_pct,eta_mac_pct,util_source,mac_metric,dram_read_gib,dram_write_gib,gpu_util_proxy_pct,gpu_mem_util_proxy_pct,mem_bw_gibs_ref,compute_peak_tf_ref,ncu_status,parse_status,stderr_log,ncu_stderr_log,nvidia_smi_log,ncu_raw_csv,ncu_rep\n" >"$OUT_CSV"
 
 for prompt_tokens in "$@"; do
   ctx_alloc=$((prompt_tokens + 1 + CTX_MARGIN))
@@ -93,6 +93,7 @@ for prompt_tokens in "$@"; do
   stdout_log="$ART_DIR/${run_name}.stdout.log"
   ncu_stdout="$ART_DIR/${run_name}.ncu.stdout.log"
   ncu_stderr="$ART_DIR/${run_name}.ncu.stderr.log"
+  smi_log="$ART_DIR/${run_name}.nvidia-smi.log"
   rep_base="$ART_DIR/${run_name}"
   rep_file="${rep_base}.ncu-rep"
   raw_csv="$ART_DIR/${run_name}.ncu.raw.csv"
@@ -115,7 +116,22 @@ for prompt_tokens in "$@"; do
     cmd+=("${extra[@]}")
   fi
 
+  smi_pid=""
+  : >"$smi_log"
+  if [[ "$BACKEND" == "cuda" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi \
+      --query-gpu=timestamp,utilization.gpu,utilization.memory,clocks.current.sm,clocks.current.memory,power.draw \
+      --format=csv,noheader,nounits \
+      -lms 100 >"$smi_log" 2>/dev/null &
+    smi_pid=$!
+  fi
+
   "${cmd[@]}" >"$stdout_log" 2>"$stderr_log"
+
+  if [[ -n "$smi_pid" ]]; then
+    kill "$smi_pid" >/dev/null 2>&1 || true
+    wait "$smi_pid" 2>/dev/null || true
+  fi
 
   ncu_status="ok"
   parse_status="ok"
@@ -156,9 +172,9 @@ for prompt_tokens in "$@"; do
     fi
   fi
 
-  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" <<'PY'
+  python3 - "$stderr_log" "$raw_csv" "$OUT_CSV" "$prompt_tokens" "$ctx_alloc" "$MEM_BW_GIBS" "$COMPUTE_PEAK_TF" "$stderr_log" "$ncu_stderr" "$smi_log" "$raw_csv" "$rep_file" "$ncu_status" "$parse_status" <<'PY'
 import csv, json, pathlib, re, subprocess, sys
-stderr_path, raw_csv, out_csv, prompt_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, raw_csv_log, rep_file, ncu_status, parse_status = sys.argv[1:]
+stderr_path, raw_csv, out_csv, prompt_tokens, ctx_alloc, mem_bw_gibs, compute_peak_tf, stderr_log, ncu_stderr_log, smi_log, raw_csv_log, rep_file, ncu_status, parse_status = sys.argv[1:]
 text = pathlib.Path(stderr_path).read_text(encoding='utf-8', errors='replace')
 m = re.search(r"ds4: prefill-only: ([0-9.]+) t/s", text)
 if not m:
@@ -172,9 +188,12 @@ prefill_s = prompt_tokens_i / prefill_tps if prefill_tps > 0 else 0.0
 parsed = {
     "eta_mem_pct": "",
     "eta_mac_pct": "",
+    "util_source": "",
     "mac_metric": "",
     "dram_read_bytes": 0.0,
     "dram_write_bytes": 0.0,
+    "gpu_util_proxy_pct": "",
+    "gpu_mem_util_proxy_pct": "",
 }
 if pathlib.Path(raw_csv).exists() and pathlib.Path(raw_csv).stat().st_size > 0:
     try:
@@ -189,6 +208,43 @@ else:
         parse_status = "empty_raw_csv"
     else:
         parse_status = "skipped"
+
+def parse_smi_proxy(path):
+    vals_gpu = []
+    vals_mem = []
+    p = pathlib.Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return None, None
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            vals_gpu.append(float(parts[1]))
+            vals_mem.append(float(parts[2]))
+        except Exception:
+            continue
+    if not vals_gpu:
+        return None, None
+    return sum(vals_gpu) / len(vals_gpu), sum(vals_mem) / len(vals_mem)
+
+gpu_util_proxy, gpu_mem_util_proxy = parse_smi_proxy(smi_log)
+if gpu_util_proxy is not None:
+    parsed["gpu_util_proxy_pct"] = gpu_util_proxy
+if gpu_mem_util_proxy is not None:
+    parsed["gpu_mem_util_proxy_pct"] = gpu_mem_util_proxy
+
+if not parsed.get("eta_mem_pct") and ncu_status == "profile_failed":
+    ncu_err = pathlib.Path(ncu_stderr_log).read_text(encoding="utf-8", errors="replace")
+    if "ERR_NVGPUCTRPERM" in ncu_err and gpu_util_proxy is not None:
+        parsed["eta_mac_pct"] = gpu_util_proxy
+        parsed["eta_mem_pct"] = gpu_mem_util_proxy if gpu_mem_util_proxy is not None else ""
+        parsed["util_source"] = "nvidia-smi-proxy"
+        parsed["mac_metric"] = "gpu_util_pct_proxy"
+        parse_status = "proxy_fallback"
+elif parsed.get("eta_mem_pct") or parsed.get("eta_mac_pct"):
+    parsed["util_source"] = "ncu"
+
 with open(out_csv, "a", newline="", encoding="utf-8") as fp:
     w = csv.writer(fp)
     w.writerow([
@@ -198,15 +254,19 @@ with open(out_csv, "a", newline="", encoding="utf-8") as fp:
         prefill_s,
         parsed.get("eta_mem_pct", ""),
         parsed.get("eta_mac_pct", ""),
+        parsed.get("util_source", ""),
         parsed.get("mac_metric", ""),
         (parsed.get("dram_read_bytes", 0.0) or 0.0) / (1024 ** 3),
         (parsed.get("dram_write_bytes", 0.0) or 0.0) / (1024 ** 3),
+        parsed.get("gpu_util_proxy_pct", ""),
+        parsed.get("gpu_mem_util_proxy_pct", ""),
         float(mem_bw_gibs),
         float(compute_peak_tf),
         ncu_status,
         parse_status,
         stderr_log,
         ncu_stderr_log,
+        smi_log,
         raw_csv_log,
         rep_file,
     ])
