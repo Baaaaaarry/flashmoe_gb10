@@ -26,11 +26,13 @@
 typedef struct {
     const char *prompt;
     const char *system;
+    int prompt_token_limit;
     int n_predict;
     int ctx_size;
     float temperature;
     float top_p;
     uint64_t seed;
+    bool prefill_only;
     bool dump_tokens;
     const char *dump_logprobs_path;
     int dump_logprobs_top_k;
@@ -117,6 +119,8 @@ static void usage(FILE *fp) {
         "      Prompt to generate from.\n"
         "  --prompt-file FILE\n"
         "      Read the prompt text from FILE.\n"
+        "  --prompt-token-limit N\n"
+        "      After tokenization, keep only the first N prompt tokens.\n"
         "  -sys, --system TEXT\n"
         "      System prompt. Empty string disables the default. Default: You are a helpful assistant\n"
         "  -n, --tokens N\n"
@@ -133,6 +137,8 @@ static void usage(FILE *fp) {
         "      Use Think Max when --ctx is at least 393216 tokens; otherwise normal thinking.\n"
         "  --nothink\n"
         "      Start assistant turns with </think> for direct non-thinking replies.\n"
+        "  --prefill-only\n"
+        "      Process the prompt only, print prefill throughput, and skip decode.\n"
         "\n"
         "Interactive commands:\n"
         "  /help\n"
@@ -454,6 +460,9 @@ static void build_prompt(ds4_engine *engine, const cli_generation_options *gen, 
         ds4_encode_chat_prompt(engine, gen->system, gen->prompt,
                                cli_effective_think_mode(gen), out);
     }
+    if (gen->prompt_token_limit > 0 && out->len > gen->prompt_token_limit) {
+        out->len = gen->prompt_token_limit;
+    }
 }
 
 static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, const ds4_tokens *prompt) {
@@ -489,6 +498,16 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
     }
     ds4_session_set_progress(session, NULL, NULL);
     const double t_prefill1 = cli_now_sec();
+    const double prefill_s = t_prefill1 - t_prefill0;
+
+    if (cfg->gen.prefill_only) {
+        ds4_log(stderr,
+                DS4_LOG_TIMING,
+                "ds4: prefill-only: %.2f t/s\n",
+                prefill_s > 0.0 ? (double)prompt->len / prefill_s : 0.0);
+        ds4_session_free(session);
+        return 0;
+    }
 
     int max_tokens = cfg->gen.n_predict;
     int room = ds4_session_ctx(session) - ds4_session_pos(session);
@@ -550,7 +569,6 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
     generation_done(&printer);
     if (cli_interrupt_requested()) cli_interrupt_clear();
 
-    const double prefill_s = t_prefill1 - t_prefill0;
     const double decode_s = t_decode1 - t_decode0;
     ds4_log(stderr,
             DS4_LOG_TIMING,
@@ -1222,6 +1240,8 @@ static cli_config parse_options(int argc, char **argv) {
             }
             c.prompt_owned = read_prompt_file(need_arg(&i, argc, argv, arg), true);
             c.gen.prompt = c.prompt_owned;
+        } else if (!strcmp(arg, "--prompt-token-limit")) {
+            c.gen.prompt_token_limit = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-sys") || !strcmp(arg, "--system")) {
             c.gen.system = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) {
@@ -1283,6 +1303,8 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.think_mode = DS4_THINK_MAX;
         } else if (!strcmp(arg, "--nothink")) {
             c.gen.think_mode = DS4_THINK_NONE;
+        } else if (!strcmp(arg, "--prefill-only")) {
+            c.gen.prefill_only = true;
         } else if (!strcmp(arg, "--head-test")) {
             c.gen.head_test = true;
         } else if (!strcmp(arg, "--first-token-test")) {
