@@ -1,0 +1,28 @@
+{
+  "output": "/Users/libo/Work/flashMoE/docs/gb10-performance-update.pptx",
+  "outputBytes": 26627,
+  "slideCount": 1,
+  "slideSize": {
+    "width": 1280,
+    "height": 720
+  },
+  "previewDir": "/Users/libo/Work/flashMoE/outputs/manual-20260601/presentations/gb10-perf-update/preview",
+  "previewPaths": [
+    "/Users/libo/Work/flashMoE/outputs/manual-20260601/presentations/gb10-perf-update/preview/slide-01.png"
+  ],
+  "layoutDir": "/Users/libo/Work/flashMoE/outputs/manual-20260601/presentations/gb10-perf-update/layout/final",
+  "layoutResults": [
+    {
+      "layoutPath": "/Users/libo/Work/flashMoE/outputs/manual-20260601/presentations/gb10-perf-update/layout/final/slide-01.layout.json"
+    }
+  ],
+  "contactSheet": "/Users/libo/Work/flashMoE/outputs/manual-20260601/presentations/gb10-perf-update/preview/contact-sheet.png",
+  "slides": [
+    {
+      "index": 1,
+      "requestedSlideNumber": 1,
+      "modulePath": "/Users/libo/Work/flashMoE/outputs/manual-20260601/presentations/gb10-perf-update/slides/slide-01.mjs",
+      "exportName": "slide01"
+    }
+  ]
+}
