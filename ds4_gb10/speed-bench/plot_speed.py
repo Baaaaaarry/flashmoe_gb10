@@ -59,26 +59,18 @@ def read_points(path):
     rows = []
     with path.open("r", encoding="utf-8-sig", newline="") as fp:
         reader = csv.DictReader(fp)
-        fields = set(reader.fieldnames or ())
-        if {"ctx_tokens", "prefill_tps", "gen_tps"}.issubset(fields):
-            ctx_key = "ctx_tokens"
-            gen_key = "gen_tps"
-        elif {"prompt_tokens", "prefill_tps", "generation_tps"}.issubset(fields):
-            ctx_key = "prompt_tokens"
-            gen_key = "generation_tps"
-        else:
-            raise SystemExit(
-                f"{path}: missing CSV column(s): expected "
-                f"(ctx_tokens,prefill_tps,gen_tps) or "
-                f"(prompt_tokens,prefill_tps,generation_tps)"
-            )
+        required = {"ctx_tokens", "prefill_tps", "gen_tps"}
+        missing = required.difference(reader.fieldnames or ())
+        if missing:
+            missing_list = ", ".join(sorted(missing))
+            raise SystemExit(f"{path}: missing CSV column(s): {missing_list}")
 
         for row in reader:
             rows.append(
                 (
-                    int(row[ctx_key]),
+                    int(row["ctx_tokens"]),
                     float(row["prefill_tps"]),
-                    float(row[gen_key]),
+                    float(row["gen_tps"]),
                 )
             )
 
