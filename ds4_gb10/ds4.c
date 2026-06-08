@@ -9274,6 +9274,7 @@ static bool flashmoe_decode_prepare_slot_cache(
         const int               *selected,
         ds4_gpu_tensor         **blob_slots,
         ds4_gpu_tensor         **selected_gpu,
+        int32_t                *selected_slots_host,
         int32_t                *selected_local_host,
         int32_t                *active_slots_host,
         uint64_t                *blob_stride_out,
@@ -9435,6 +9436,11 @@ static bool flashmoe_decode_prepare_slot_cache(
     if (blob_slots) *blob_slots = g->flashmoe_decode_blob_slots[il];
     if (selected_gpu) *selected_gpu = g->flashmoe_decode_selected_gpu[il];
     if (selected_local_host) memcpy(selected_local_host, selected_local, sizeof(selected_local));
+    if (selected_slots_host) {
+        for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
+            selected_slots_host[i] = active_slots[selected_local[i]];
+        }
+    }
     if (active_slots_host) memcpy(active_slots_host, active_slots, (size_t)active_count * sizeof(active_slots[0]));
     if (blob_stride_out) *blob_stride_out = blob_stride;
     if (gate_expert_bytes) *gate_expert_bytes = gate_bytes;
@@ -9540,6 +9546,7 @@ static bool metal_graph_decode_routed_flashmoe(
     ds4_gpu_tensor *blob_slots = NULL, *selected_gpu = NULL;
     ds4_flashmoe_selected_pack pack;
     ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL;
+    int32_t selected_slots_host[DS4_N_EXPERT_USED];
     int32_t selected_local_host[DS4_N_EXPERT_USED];
     int32_t active_slots_host[DS4_N_EXPERT_USED];
     bool ok = false;
@@ -9578,6 +9585,7 @@ static bool metal_graph_decode_routed_flashmoe(
                                             selected,
                                             &blob_slots,
                                             &selected_gpu,
+                                            selected_slots_host,
                                             selected_local_host,
                                             active_slots_host,
                                             &blob_stride,
@@ -9593,7 +9601,7 @@ static bool metal_graph_decode_routed_flashmoe(
     const double t_sel0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
     if (ds4_gpu_tensor_write(selected_gpu,
                              0,
-                             selected_local_host,
+                             selected_slots_host,
                              (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t)) == 0) goto cleanup;
     if (flashmoe_timing_enabled()) upload_s += now_sec() - t_sel0;
     const uint64_t routed_mid_dim = layer->ffn_gate_exps->dim[1];
