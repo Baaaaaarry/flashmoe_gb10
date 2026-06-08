@@ -4509,45 +4509,6 @@ static bool flashmoe_write_slot_tensor_run(ds4_gpu_tensor *base,
     return ds4_gpu_tensor_write(base, start_slot * slot_bytes, src, run_bytes) != 0;
 }
 
-static bool flashmoe_decode_gpu_cache_ensure_alloc(
-        ds4_gpu_graph *g,
-        const ds4_weights *weights) {
-    if (!g || !weights) return false;
-    if (!flashmoe_decode_gpu_cache_enabled()) return true;
-    const uint32_t decode_slots = flashmoe_decode_slot_count();
-    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        if (g->flashmoe_decode_blob_slots[il] && g->flashmoe_decode_selected_gpu[il]) continue;
-        const ds4_layer_weights *l = &weights->layer[il];
-        const uint64_t gate_rb = routed_expert_row_bytes(l->ffn_gate_exps);
-        const uint64_t up_rb = routed_expert_row_bytes(l->ffn_up_exps);
-        const uint64_t down_rb = routed_expert_row_bytes(l->ffn_down_exps);
-        const uint64_t gate_exp_bytes = gate_rb * l->ffn_gate_exps->dim[1];
-        const uint64_t up_exp_bytes = up_rb * l->ffn_up_exps->dim[1];
-        const uint64_t down_exp_bytes = down_rb * l->ffn_down_exps->dim[1];
-        const uint64_t blob_exp_bytes = gate_exp_bytes + up_exp_bytes + down_exp_bytes;
-        if (!g->flashmoe_decode_blob_slots[il]) {
-            g->flashmoe_decode_blob_slots[il] =
-                    ds4_gpu_tensor_alloc((uint64_t)decode_slots * blob_exp_bytes);
-        }
-        if (!g->flashmoe_decode_selected_gpu[il]) {
-            g->flashmoe_decode_selected_gpu[il] =
-                    ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t));
-        }
-        if (!g->flashmoe_decode_blob_slots[il] || !g->flashmoe_decode_selected_gpu[il]) {
-            return false;
-        }
-        g->flashmoe_decode_next_slot[il] = 0;
-        for (uint32_t i = 0; i < DS4_FLASHMOE_DECODE_SLOT_CAP; i++) {
-            g->flashmoe_decode_slot_valid[il][i] = 0u;
-            g->flashmoe_decode_slot_expert[il][i] = -1;
-        }
-        for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
-            g->flashmoe_decode_expert_slot[il][expert] = -1;
-        }
-    }
-    return true;
-}
-
 #endif
 
 static void layer_routed_moe_one_prealloc_flashmoe_selected(
@@ -9784,6 +9745,45 @@ cleanup:
     if (gate_w != g->flashmoe_gate_w) ds4_gpu_tensor_free(gate_w);
     flashmoe_selected_pack_free(&pack);
     return ok;
+}
+
+static bool flashmoe_decode_gpu_cache_ensure_alloc(
+        ds4_gpu_graph *g,
+        const ds4_weights *weights) {
+    if (!g || !weights) return false;
+    if (!flashmoe_decode_gpu_cache_enabled()) return true;
+    const uint32_t decode_slots = flashmoe_decode_slot_count();
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        if (g->flashmoe_decode_blob_slots[il] && g->flashmoe_decode_selected_gpu[il]) continue;
+        const ds4_layer_weights *l = &weights->layer[il];
+        const uint64_t gate_rb = routed_expert_row_bytes(l->ffn_gate_exps);
+        const uint64_t up_rb = routed_expert_row_bytes(l->ffn_up_exps);
+        const uint64_t down_rb = routed_expert_row_bytes(l->ffn_down_exps);
+        const uint64_t gate_exp_bytes = gate_rb * l->ffn_gate_exps->dim[1];
+        const uint64_t up_exp_bytes = up_rb * l->ffn_up_exps->dim[1];
+        const uint64_t down_exp_bytes = down_rb * l->ffn_down_exps->dim[1];
+        const uint64_t blob_exp_bytes = gate_exp_bytes + up_exp_bytes + down_exp_bytes;
+        if (!g->flashmoe_decode_blob_slots[il]) {
+            g->flashmoe_decode_blob_slots[il] =
+                    ds4_gpu_tensor_alloc((uint64_t)decode_slots * blob_exp_bytes);
+        }
+        if (!g->flashmoe_decode_selected_gpu[il]) {
+            g->flashmoe_decode_selected_gpu[il] =
+                    ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t));
+        }
+        if (!g->flashmoe_decode_blob_slots[il] || !g->flashmoe_decode_selected_gpu[il]) {
+            return false;
+        }
+        g->flashmoe_decode_next_slot[il] = 0;
+        for (uint32_t i = 0; i < DS4_FLASHMOE_DECODE_SLOT_CAP; i++) {
+            g->flashmoe_decode_slot_valid[il][i] = 0u;
+            g->flashmoe_decode_slot_expert[il][i] = -1;
+        }
+        for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
+            g->flashmoe_decode_expert_slot[il][expert] = -1;
+        }
+    }
+    return true;
 }
 #endif
 
