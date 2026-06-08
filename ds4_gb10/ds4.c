@@ -4479,7 +4479,7 @@ static bool flashmoe_decode_blob_slot_enabled(void) {
     return cache != 0;
 }
 
-#define DS4_FLASHMOE_DECODE_SLOT_CAP 128u
+#define DS4_FLASHMOE_DECODE_SLOT_CAP 256u
 
 static uint32_t flashmoe_decode_slot_count(void) {
     static uint32_t cache = 0;
@@ -9226,6 +9226,7 @@ typedef struct ds4_gpu_graph {
     ds4_gpu_tensor *flashmoe_decode_selected_gpu[DS4_N_LAYER];
     int32_t flashmoe_decode_slot_expert[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
     uint8_t flashmoe_decode_slot_valid[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
+    int16_t flashmoe_decode_expert_slot[DS4_N_LAYER][DS4_N_EXPERT];
     uint32_t flashmoe_decode_next_slot[DS4_N_LAYER];
     uint64_t flashmoe_gate_w_bytes;
     uint64_t flashmoe_up_w_bytes;
@@ -9320,16 +9321,20 @@ static bool flashmoe_decode_prepare_slot_cache(
     }
 
     for (uint32_t i = 0; i < active_count; i++) {
-        int32_t slot_index = -1;
-        for (uint32_t slot = 0; slot < slot_count; slot++) {
-            if (g->flashmoe_decode_slot_valid[il][slot] &&
-                g->flashmoe_decode_slot_expert[il][slot] == (int)active_global[i]) {
-                if (flashmoe_timing_enabled()) {
-                    g->flashmoe_decode_used = true;
-                    g->flashmoe_decode_hits += 1u;
-                }
-                slot_index = (int32_t)slot;
-                break;
+        int32_t slot_index = g->flashmoe_decode_expert_slot[il][active_global[i]];
+        if (slot_index >= 0) {
+            const uint32_t slot = (uint32_t)slot_index;
+            if (!(slot < slot_count &&
+                  g->flashmoe_decode_slot_valid[il][slot] &&
+                  g->flashmoe_decode_slot_expert[il][slot] == (int)active_global[i])) {
+                g->flashmoe_decode_expert_slot[il][active_global[i]] = -1;
+                slot_index = -1;
+            }
+        }
+        if (slot_index >= 0) {
+            if (flashmoe_timing_enabled()) {
+                g->flashmoe_decode_used = true;
+                g->flashmoe_decode_hits += 1u;
             }
         }
         if (slot_index < 0) {
@@ -9364,6 +9369,12 @@ static bool flashmoe_decode_prepare_slot_cache(
                 }
                 if (slot == slot_count) slot = g->flashmoe_decode_next_slot[il] % slot_count;
                 g->flashmoe_decode_next_slot[il] = (slot + 1u) % slot_count;
+            }
+            if (g->flashmoe_decode_slot_valid[il][slot]) {
+                const int old_expert = g->flashmoe_decode_slot_expert[il][slot];
+                if (old_expert >= 0 && old_expert < DS4_N_EXPERT) {
+                    g->flashmoe_decode_expert_slot[il][old_expert] = -1;
+                }
             }
             miss_experts[miss_count] = active_global[i];
             miss_slots[miss_count] = slot;
@@ -9430,6 +9441,7 @@ static bool flashmoe_decode_prepare_slot_cache(
             const uint32_t slot = miss_slots[i];
             g->flashmoe_decode_slot_valid[il][slot] = 1u;
             g->flashmoe_decode_slot_expert[il][slot] = miss_experts[i];
+            g->flashmoe_decode_expert_slot[il][miss_experts[i]] = (int16_t)slot;
         }
     }
 
@@ -9542,7 +9554,7 @@ static bool metal_graph_decode_routed_flashmoe(
         double                 *host_s_out,
         double                 *upload_s_out,
         double                 *kernel_s_out) {
-    int selected[DS4_N_EXPERT_USED];
+    int *selected = g->flashmoe_selected_host;
     ds4_gpu_tensor *blob_slots = NULL, *selected_gpu = NULL;
     ds4_flashmoe_selected_pack pack;
     ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL;
@@ -9565,7 +9577,8 @@ static bool metal_graph_decode_routed_flashmoe(
     memset(&pack, 0, sizeof(pack));
 
     const double t_read0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
-    if (ds4_gpu_tensor_read(g->router_selected, 0, selected, sizeof(selected)) == 0) goto cleanup;
+    if (!selected) goto cleanup;
+    if (ds4_gpu_tensor_read(g->router_selected, 0, selected, (uint64_t)DS4_N_EXPERT_USED * sizeof(selected[0])) == 0) goto cleanup;
     if (flashmoe_timing_enabled()) readback_s += now_sec() - t_read0;
 
     if (!flashmoe_decode_blob_slot_enabled()) {
@@ -9737,12 +9750,12 @@ cleanup:
 
 /* Release every Metal tensor owned by the whole-model graph runtime. */
 static void metal_graph_free(ds4_gpu_graph *g) {
-    free(g->flashmoe_down_host);
-    free(g->flashmoe_up_host);
-    free(g->flashmoe_gate_host);
-    free(g->flashmoe_blob_host);
+    ds4_gpu_host_free_pinned(g->flashmoe_down_host);
+    ds4_gpu_host_free_pinned(g->flashmoe_up_host);
+    ds4_gpu_host_free_pinned(g->flashmoe_gate_host);
+    ds4_gpu_host_free_pinned(g->flashmoe_blob_host);
     free(g->flashmoe_selected_local_host);
-    free(g->flashmoe_selected_host);
+    ds4_gpu_host_free_pinned(g->flashmoe_selected_host);
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
         ds4_gpu_tensor_free(g->flashmoe_decode_selected_gpu[il]);
         ds4_gpu_tensor_free(g->flashmoe_decode_blob_slots[il]);
@@ -10167,6 +10180,9 @@ static bool metal_graph_alloc_raw_cap(
                 g->flashmoe_decode_slot_valid[il][i] = 0u;
                 g->flashmoe_decode_slot_expert[il][i] = -1;
             }
+            for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
+                g->flashmoe_decode_expert_slot[il][expert] = -1;
+            }
         }
         if ((uint64_t)DS4_N_EXPERT * gate_exp_bytes > flashmoe_gate_bytes_max) {
             flashmoe_gate_bytes_max = (uint64_t)DS4_N_EXPERT * gate_exp_bytes;
@@ -10342,12 +10358,12 @@ static bool metal_graph_alloc_raw_cap(
     g->flashmoe_gate_w_bytes = flashmoe_gate_bytes_max;
     g->flashmoe_up_w_bytes = flashmoe_up_bytes_max;
     g->flashmoe_down_w_bytes = flashmoe_down_bytes_max;
-    g->flashmoe_selected_host = xmalloc((size_t)flashmoe_selected_pairs_cap * sizeof(g->flashmoe_selected_host[0]));
+    g->flashmoe_selected_host = (int *)ds4_gpu_host_alloc_pinned((uint64_t)flashmoe_selected_pairs_cap * sizeof(g->flashmoe_selected_host[0]));
     g->flashmoe_selected_local_host = xmalloc((size_t)flashmoe_selected_pairs_cap * sizeof(g->flashmoe_selected_local_host[0]));
-    g->flashmoe_blob_host = xmalloc((size_t)flashmoe_blob_bytes_max);
-    g->flashmoe_gate_host = xmalloc((size_t)flashmoe_gate_bytes_max);
-    g->flashmoe_up_host = xmalloc((size_t)flashmoe_up_bytes_max);
-    g->flashmoe_down_host = xmalloc((size_t)flashmoe_down_bytes_max);
+    g->flashmoe_blob_host = (uint8_t *)ds4_gpu_host_alloc_pinned(flashmoe_blob_bytes_max);
+    g->flashmoe_gate_host = (uint8_t *)ds4_gpu_host_alloc_pinned(flashmoe_gate_bytes_max);
+    g->flashmoe_up_host = (uint8_t *)ds4_gpu_host_alloc_pinned(flashmoe_up_bytes_max);
+    g->flashmoe_down_host = (uint8_t *)ds4_gpu_host_alloc_pinned(flashmoe_down_bytes_max);
     g->flashmoe_selected_host_cap = flashmoe_selected_pairs_cap;
     g->flashmoe_selected_local_cap = flashmoe_selected_pairs_cap;
     g->flashmoe_blob_host_bytes = flashmoe_blob_bytes_max;

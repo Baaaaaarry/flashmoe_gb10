@@ -1304,6 +1304,20 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes) {
     return t;
 }
 
+extern "C" void *ds4_gpu_host_alloc_pinned(uint64_t bytes) {
+    if (bytes == 0) bytes = 1;
+    void *ptr = NULL;
+    if (!cuda_ok(cudaHostAlloc(&ptr, (size_t)bytes, cudaHostAllocPortable), "host pinned alloc")) {
+        return NULL;
+    }
+    return ptr;
+}
+
+extern "C" void ds4_gpu_host_free_pinned(void *ptr) {
+    if (!ptr) return;
+    (void)cudaFreeHost(ptr);
+}
+
 extern "C" ds4_gpu_tensor *ds4_gpu_tensor_view(const ds4_gpu_tensor *base, uint64_t offset, uint64_t bytes) {
     if (!base || offset > base->bytes || bytes > base->bytes - offset) return NULL;
     ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
