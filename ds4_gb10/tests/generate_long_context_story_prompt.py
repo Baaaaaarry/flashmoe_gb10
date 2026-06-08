@@ -12,6 +12,8 @@ import argparse
 import random
 from pathlib import Path
 
+DEFAULT_TOKEN_MARGIN = 1.20
+
 BOS = "<｜begin▁of▁sentence｜>"
 USER = "<｜User｜>"
 ASSISTANT = "<｜Assistant｜>"
@@ -196,14 +198,15 @@ def rough_token_estimate(text: str) -> int:
     return max(1, len(text.encode("utf-8")) // 4)
 
 
-def build_prompt(min_tokens: int) -> str:
+def build_prompt(min_tokens: int, token_margin: float) -> str:
     scene_count = 190
     rendered = render_story(scene_count)
     if min_tokens <= 0:
         return rendered
+    target_tokens = max(min_tokens, int(min_tokens * token_margin + 0.999999))
 
     # Grow geometrically first to avoid many rebuilds on very long targets.
-    while rough_token_estimate(rendered) < min_tokens:
+    while rough_token_estimate(rendered) < target_tokens:
         scene_count = max(scene_count + 1, int(scene_count * 1.5))
         rendered = render_story(scene_count)
 
@@ -215,7 +218,7 @@ def build_prompt(min_tokens: int) -> str:
         mid = (low + high) // 2
         candidate = render_story(mid)
         est = rough_token_estimate(candidate)
-        if est >= min_tokens:
+        if est >= target_tokens:
             best = candidate
             high = mid - 1
         else:
@@ -227,15 +230,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate the long-context fact-recall prompt used by ds4 tests.")
     parser.add_argument("--min-tokens", type=int, default=0,
                         help="Minimum rough token estimate for the output prompt (bytes/4 heuristic).")
+    parser.add_argument("--token-margin", type=float, default=DEFAULT_TOKEN_MARGIN,
+                        help="Safety multiplier applied to --min-tokens to compensate for rough token underestimation. Default: 1.20.")
     parser.add_argument("--output", type=Path, default=None,
                         help="Output path. Defaults to tests/long_context_story_prompt.txt beside this script.")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
     output = args.output if args.output is not None else (root / "long_context_story_prompt.txt")
-    rendered = build_prompt(args.min_tokens)
+    rendered = build_prompt(args.min_tokens, args.token_margin)
     output.write_text(rendered, encoding="utf-8")
-    print(f"wrote {output} rough_tokens={rough_token_estimate(rendered)} bytes={len(rendered.encode('utf-8'))}")
+    target_tokens = max(args.min_tokens, int(args.min_tokens * args.token_margin + 0.999999))
+    print(
+        f"wrote {output} rough_tokens={rough_token_estimate(rendered)} "
+        f"target_tokens={target_tokens} token_margin={args.token_margin:.2f} "
+        f"bytes={len(rendered.encode('utf-8'))}"
+    )
 
 
 if __name__ == "__main__":
