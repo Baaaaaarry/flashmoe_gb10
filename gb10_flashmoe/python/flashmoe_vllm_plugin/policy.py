@@ -28,8 +28,15 @@ class CachePolicyFeatures:
 
 
 class CachePolicyModel:
-    def __init__(self, layers: list[dict[str, list[list[float]] | list[float]]]):
+    def __init__(self, layers: list[dict[str, list[list[float]] | list[float]]], feature_names: list[str] | None = None):
         self.layers = layers
+        self.feature_names = feature_names or [
+            "recency",
+            "frequency",
+            "size_ratio",
+            "layer_pressure",
+            "is_prefetched",
+        ]
 
     @classmethod
     def maybe_load(cls, path: str) -> "CachePolicyModel | None":
@@ -39,10 +46,18 @@ class CachePolicyModel:
         if not target.exists():
             return None
         raw = json.loads(target.read_text())
-        return cls(raw["layers"])
+        return cls(raw["layers"], raw.get("feature_names"))
 
     def score(self, features: CachePolicyFeatures) -> float:
-        x = features.as_list()
+        values = {
+            "recency": features.recency,
+            "frequency": features.frequency,
+            "reuse_distance": features.reuse_distance,
+            "size_ratio": features.size_ratio,
+            "layer_pressure": features.layer_pressure,
+            "is_prefetched": features.is_prefetched,
+        }
+        x = [values.get(name, 0.0) for name in self.feature_names]
         for layer in self.layers:
             x = _linear(layer["weight"], x, layer["bias"])
             if layer.get("activation", "relu") == "relu":
@@ -60,4 +75,3 @@ def _linear(weight: list[list[float]], x: list[float], bias: list[float]) -> lis
             acc += w * value
         out.append(acc)
     return out
-

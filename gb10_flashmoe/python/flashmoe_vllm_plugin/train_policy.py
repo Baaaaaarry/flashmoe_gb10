@@ -17,27 +17,20 @@ def _require_torch():
     return torch, nn
 
 
-def _load_rows(path: Path) -> tuple[list[list[float]], list[float]]:
+def _load_rows(path: Path, feature_names: list[str]) -> tuple[list[list[float]], list[float]]:
     feats: list[list[float]] = []
     labels: list[float] = []
     with path.open() as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            feats.append([
-                float(row["recency"]),
-                float(row["frequency"]),
-                float(row["reuse_distance"]),
-                float(row["size_ratio"]),
-                float(row["layer_pressure"]),
-                float(row.get("is_prefetched", 0.0)),
-            ])
+            feats.append([float(row.get(name, 0.0)) for name in feature_names])
             labels.append(float(row["label"]))
     return feats, labels
 
 
-def train(input_csv: Path, output_json: Path, epochs: int, hidden_dim: int, lr: float) -> None:
+def train(input_csv: Path, output_json: Path, epochs: int, hidden_dim: int, lr: float, feature_names: list[str]) -> None:
     torch, nn = _require_torch()
-    features, labels = _load_rows(input_csv)
+    features, labels = _load_rows(input_csv, feature_names)
     x = torch.tensor(features, dtype=torch.float32)
     y = torch.tensor(labels, dtype=torch.float32).unsqueeze(-1)
 
@@ -66,7 +59,7 @@ def train(input_csv: Path, output_json: Path, epochs: int, hidden_dim: int, lr: 
             })
     if layers:
         layers[-1]["activation"] = "identity"
-    output_json.write_text(json.dumps({"layers": layers}, indent=2))
+    output_json.write_text(json.dumps({"feature_names": feature_names, "layers": layers}, indent=2))
 
 
 def main() -> None:
@@ -76,8 +69,10 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--features", default="recency,frequency,size_ratio,layer_pressure,is_prefetched")
     args = parser.parse_args()
-    train(args.input, args.output, args.epochs, args.hidden_dim, args.lr)
+    feature_names = [piece.strip() for piece in args.features.split(",") if piece.strip()]
+    train(args.input, args.output, args.epochs, args.hidden_dim, args.lr, feature_names)
 
 
 if __name__ == "__main__":

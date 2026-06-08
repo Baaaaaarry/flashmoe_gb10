@@ -519,6 +519,33 @@ static void *xmalloc_zeroed(size_t n, size_t size) {
     return p;
 }
 
+static DS4_MAYBE_UNUSED char *ds4_read_text_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    long len = ftell(fp);
+    if (len < 0) {
+        fclose(fp);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    char *buf = xmalloc((size_t)len + 1u);
+    size_t nread = fread(buf, 1, (size_t)len, fp);
+    fclose(fp);
+    if (nread != (size_t)len) {
+        free(buf);
+        return NULL;
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
 static double now_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -4481,6 +4508,398 @@ static bool flashmoe_decode_blob_slot_enabled(void) {
 
 #define DS4_FLASHMOE_DECODE_SLOT_CAP 256u
 
+typedef enum {
+    DS4_FLASHMOE_EVICT_ROUND_ROBIN = 0,
+    DS4_FLASHMOE_EVICT_LRU = 1,
+    DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY = 2,
+    DS4_FLASHMOE_EVICT_PREDICTOR = 3,
+} ds4_flashmoe_evict_policy;
+
+typedef enum {
+    DS4_FLASHMOE_FEAT_RECENCY = 0,
+    DS4_FLASHMOE_FEAT_FREQUENCY = 1,
+    DS4_FLASHMOE_FEAT_SIZE_RATIO = 2,
+    DS4_FLASHMOE_FEAT_LAYER_PRESSURE = 3,
+    DS4_FLASHMOE_FEAT_IS_PREFETCHED = 4,
+    DS4_FLASHMOE_FEAT_SLOT_AGE = 5,
+} ds4_flashmoe_feature_id;
+
+typedef struct {
+    bool attempted;
+    bool loaded;
+    size_t input_dim;
+    size_t hidden_dim;
+    size_t output_dim;
+    size_t feature_count;
+    ds4_flashmoe_feature_id feature_ids[16];
+    float *w1;
+    float *b1;
+    float *w2;
+    float *b2;
+} ds4_flashmoe_predictor_model;
+
+static ds4_flashmoe_evict_policy flashmoe_decode_evict_policy(void) {
+    static int cache = -1;
+    if (cache != -1) return (ds4_flashmoe_evict_policy)cache;
+    const char *env = getenv("DS4_FLASHMOE_DECODE_EVICT_POLICY");
+    ds4_flashmoe_evict_policy policy = DS4_FLASHMOE_EVICT_ROUND_ROBIN;
+    if (env && env[0]) {
+        if (strcmp(env, "lru") == 0) {
+            policy = DS4_FLASHMOE_EVICT_LRU;
+        } else if (strcmp(env, "recency_frequency") == 0) {
+            policy = DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY;
+        } else if (strcmp(env, "predictor") == 0) {
+            policy = DS4_FLASHMOE_EVICT_PREDICTOR;
+        }
+    }
+    cache = (int)policy;
+    return policy;
+}
+
+static const char *flashmoe_cache_trace_path(void) {
+    static const char *cache = (const char *)(uintptr_t)1u;
+    if (cache != (const char *)(uintptr_t)1u) return cache;
+    const char *env = getenv("DS4_FLASHMOE_CACHE_TRACE");
+    cache = (env && env[0]) ? env : NULL;
+    return cache;
+}
+
+static FILE *flashmoe_cache_trace_file(void) {
+    static FILE *fp = NULL;
+    static bool attempted = false;
+    if (attempted) return fp;
+    attempted = true;
+    const char *path = flashmoe_cache_trace_path();
+    if (!path) return NULL;
+    fp = fopen(path, "a");
+    if (fp) {
+        fprintf(fp, "# step layer experts...\n");
+        fflush(fp);
+    }
+    return fp;
+}
+
+static void flashmoe_cache_trace_append(uint64_t step, uint32_t layer, const uint16_t *experts, uint32_t count) {
+    FILE *fp = flashmoe_cache_trace_file();
+    if (!fp || !experts || count == 0) return;
+    fprintf(fp, "%" PRIu64 " %u", step, layer);
+    for (uint32_t i = 0; i < count; i++) fprintf(fp, " %u", (unsigned)experts[i]);
+    fputc('\n', fp);
+    fflush(fp);
+}
+
+static void flashmoe_skip_ws(const char **p) {
+    while (**p && isspace((unsigned char)**p)) (*p)++;
+}
+
+static bool flashmoe_json_expect(const char **p, char want) {
+    flashmoe_skip_ws(p);
+    if (**p != want) return false;
+    (*p)++;
+    return true;
+}
+
+static char *flashmoe_json_parse_string(const char **p) {
+    flashmoe_skip_ws(p);
+    if (**p != '"') return NULL;
+    (*p)++;
+    const char *start = *p;
+    while (**p && **p != '"') {
+        if (**p == '\\' && (*p)[1]) (*p)++;
+        (*p)++;
+    }
+    if (**p != '"') return NULL;
+    size_t len = (size_t)(*p - start);
+    char *out = xmalloc(len + 1u);
+    memcpy(out, start, len);
+    out[len] = '\0';
+    (*p)++;
+    return out;
+}
+
+static bool flashmoe_json_parse_float(const char **p, float *out) {
+    flashmoe_skip_ws(p);
+    char *end = NULL;
+    errno = 0;
+    float v = strtof(*p, &end);
+    if (end == *p || errno != 0) return false;
+    *out = v;
+    *p = end;
+    return true;
+}
+
+static bool flashmoe_json_parse_float_array(const char **p, float **vals, size_t *count) {
+    if (!flashmoe_json_expect(p, '[')) return false;
+    size_t cap = 8, n = 0;
+    float *tmp = xmalloc(cap * sizeof(tmp[0]));
+    flashmoe_skip_ws(p);
+    if (**p == ']') {
+        (*p)++;
+        *vals = tmp;
+        *count = 0;
+        return true;
+    }
+    while (1) {
+        float v = 0.0f;
+        if (!flashmoe_json_parse_float(p, &v)) { free(tmp); return false; }
+        if (n == cap) {
+            cap *= 2u;
+            tmp = xrealloc(tmp, cap * sizeof(tmp[0]));
+        }
+        tmp[n++] = v;
+        flashmoe_skip_ws(p);
+        if (**p == ',') {
+            (*p)++;
+            continue;
+        }
+        if (**p == ']') {
+            (*p)++;
+            *vals = tmp;
+            *count = n;
+            return true;
+        }
+        free(tmp);
+        return false;
+    }
+}
+
+static bool flashmoe_json_parse_string_array(const char **p, char ***vals, size_t *count) {
+    if (!flashmoe_json_expect(p, '[')) return false;
+    size_t cap = 8, n = 0;
+    char **tmp = xmalloc(cap * sizeof(tmp[0]));
+    flashmoe_skip_ws(p);
+    if (**p == ']') {
+        (*p)++;
+        *vals = tmp;
+        *count = 0;
+        return true;
+    }
+    while (1) {
+        char *s = flashmoe_json_parse_string(p);
+        if (!s) {
+            for (size_t i = 0; i < n; i++) free(tmp[i]);
+            free(tmp);
+            return false;
+        }
+        if (n == cap) {
+            cap *= 2u;
+            tmp = xrealloc(tmp, cap * sizeof(tmp[0]));
+        }
+        tmp[n++] = s;
+        flashmoe_skip_ws(p);
+        if (**p == ',') {
+            (*p)++;
+            continue;
+        }
+        if (**p == ']') {
+            (*p)++;
+            *vals = tmp;
+            *count = n;
+            return true;
+        }
+        for (size_t i = 0; i < n; i++) free(tmp[i]);
+        free(tmp);
+        return false;
+    }
+}
+
+static bool flashmoe_json_parse_matrix(const char **p, float **vals, size_t *rows, size_t *cols) {
+    if (!flashmoe_json_expect(p, '[')) return false;
+    size_t row_cap = 4, row_count = 0, col_count = 0, total = 0, total_cap = 16;
+    float *tmp = xmalloc(total_cap * sizeof(tmp[0]));
+    flashmoe_skip_ws(p);
+    if (**p == ']') {
+        (*p)++;
+        *vals = tmp;
+        *rows = 0;
+        *cols = 0;
+        return true;
+    }
+    while (1) {
+        float *row_vals = NULL;
+        size_t row_n = 0;
+        if (!flashmoe_json_parse_float_array(p, &row_vals, &row_n)) { free(tmp); return false; }
+        if (row_count == 0) col_count = row_n;
+        if (row_n != col_count) { free(row_vals); free(tmp); return false; }
+        if (row_count == row_cap) row_cap *= 2u;
+        if (total + row_n > total_cap) {
+            while (total + row_n > total_cap) total_cap *= 2u;
+            tmp = xrealloc(tmp, total_cap * sizeof(tmp[0]));
+        }
+        memcpy(tmp + total, row_vals, row_n * sizeof(row_vals[0]));
+        total += row_n;
+        free(row_vals);
+        row_count++;
+        flashmoe_skip_ws(p);
+        if (**p == ',') {
+            (*p)++;
+            continue;
+        }
+        if (**p == ']') {
+            (*p)++;
+            *vals = tmp;
+            *rows = row_count;
+            *cols = col_count;
+            return true;
+        }
+        free(tmp);
+        return false;
+    }
+}
+
+static void flashmoe_predictor_model_free(ds4_flashmoe_predictor_model *m) {
+    if (!m) return;
+    free(m->w1); free(m->b1); free(m->w2); free(m->b2);
+    memset(m, 0, sizeof(*m));
+}
+
+static bool flashmoe_predictor_feature_id(const char *name, ds4_flashmoe_feature_id *out) {
+    if (strcmp(name, "recency") == 0) *out = DS4_FLASHMOE_FEAT_RECENCY;
+    else if (strcmp(name, "frequency") == 0) *out = DS4_FLASHMOE_FEAT_FREQUENCY;
+    else if (strcmp(name, "size_ratio") == 0) *out = DS4_FLASHMOE_FEAT_SIZE_RATIO;
+    else if (strcmp(name, "layer_pressure") == 0) *out = DS4_FLASHMOE_FEAT_LAYER_PRESSURE;
+    else if (strcmp(name, "is_prefetched") == 0) *out = DS4_FLASHMOE_FEAT_IS_PREFETCHED;
+    else if (strcmp(name, "slot_age") == 0) *out = DS4_FLASHMOE_FEAT_SLOT_AGE;
+    else return false;
+    return true;
+}
+
+static bool flashmoe_predictor_model_load(ds4_flashmoe_predictor_model *out, const char *path) {
+    char *text = ds4_read_text_file(path);
+    if (!text) return false;
+    const char *p = text;
+    bool ok = false;
+    ds4_flashmoe_predictor_model m = {0};
+    if (!flashmoe_json_expect(&p, '{')) goto done;
+    while (1) {
+        char *key = flashmoe_json_parse_string(&p);
+        if (!key) goto done;
+        if (!flashmoe_json_expect(&p, ':')) { free(key); goto done; }
+        if (strcmp(key, "feature_names") == 0) {
+            char **names = NULL;
+            size_t n = 0;
+            if (!flashmoe_json_parse_string_array(&p, &names, &n) || n > 16) {
+                free(key);
+                goto done;
+            }
+            m.feature_count = n;
+            for (size_t i = 0; i < n; i++) {
+                if (!flashmoe_predictor_feature_id(names[i], &m.feature_ids[i])) {
+                    for (size_t j = 0; j < n; j++) free(names[j]);
+                    free(names);
+                    free(key);
+                    goto done;
+                }
+                free(names[i]);
+            }
+            free(names);
+        } else if (strcmp(key, "layers") == 0) {
+            if (!flashmoe_json_expect(&p, '[')) { free(key); goto done; }
+            for (int layer_idx = 0; layer_idx < 2; layer_idx++) {
+                if (!flashmoe_json_expect(&p, '{')) { free(key); goto done; }
+                float *weight = NULL, *bias = NULL;
+                size_t rows = 0, cols = 0, bias_n = 0;
+                char *activation = NULL;
+                while (1) {
+                    char *lkey = flashmoe_json_parse_string(&p);
+                    if (!lkey) { free(key); goto done; }
+                    if (!flashmoe_json_expect(&p, ':')) { free(lkey); free(key); goto done; }
+                    if (strcmp(lkey, "weight") == 0) {
+                        if (!flashmoe_json_parse_matrix(&p, &weight, &rows, &cols)) { free(lkey); free(key); goto done; }
+                    } else if (strcmp(lkey, "bias") == 0) {
+                        if (!flashmoe_json_parse_float_array(&p, &bias, &bias_n)) { free(lkey); free(key); goto done; }
+                    } else if (strcmp(lkey, "activation") == 0) {
+                        activation = flashmoe_json_parse_string(&p);
+                        if (!activation) { free(lkey); free(key); goto done; }
+                    } else {
+                        free(lkey); free(key); goto done;
+                    }
+                    free(lkey);
+                    flashmoe_skip_ws(&p);
+                    if (*p == ',') { p++; continue; }
+                    if (*p == '}') { p++; break; }
+                    free(key);
+                    goto done;
+                }
+                if (!weight || !bias || !activation || rows != bias_n) { free(key); goto done; }
+                if (layer_idx == 0) {
+                    m.w1 = weight; m.b1 = bias; m.input_dim = cols; m.hidden_dim = rows;
+                } else {
+                    m.w2 = weight; m.b2 = bias; m.output_dim = rows;
+                }
+                free(activation);
+                flashmoe_skip_ws(&p);
+                if (layer_idx == 0) {
+                    if (*p != ',') { free(key); goto done; }
+                    p++;
+                }
+            }
+            flashmoe_skip_ws(&p);
+            if (*p != ']') { free(key); goto done; }
+            p++;
+        } else {
+            free(key);
+            goto done;
+        }
+        free(key);
+        flashmoe_skip_ws(&p);
+        if (*p == ',') { p++; continue; }
+        if (*p == '}') { p++; break; }
+        goto done;
+    }
+    if (m.feature_count == 0) {
+        m.feature_count = 5;
+        m.feature_ids[0] = DS4_FLASHMOE_FEAT_RECENCY;
+        m.feature_ids[1] = DS4_FLASHMOE_FEAT_FREQUENCY;
+        m.feature_ids[2] = DS4_FLASHMOE_FEAT_SIZE_RATIO;
+        m.feature_ids[3] = DS4_FLASHMOE_FEAT_LAYER_PRESSURE;
+        m.feature_ids[4] = DS4_FLASHMOE_FEAT_IS_PREFETCHED;
+    }
+    if (!m.w1 || !m.b1 || !m.w2 || !m.b2 || m.output_dim != 1 || m.input_dim != m.feature_count) goto done;
+    *out = m;
+    memset(&m, 0, sizeof(m));
+    ok = true;
+done:
+    flashmoe_predictor_model_free(&m);
+    free(text);
+    return ok;
+}
+
+static ds4_flashmoe_predictor_model *flashmoe_predictor_model_get(void) {
+    static ds4_flashmoe_predictor_model model = {0};
+    if (model.attempted) return model.loaded ? &model : NULL;
+    model.attempted = true;
+    const char *path = getenv("DS4_FLASHMOE_PREDICTOR_JSON");
+    if (!path || !path[0]) return NULL;
+    ds4_flashmoe_predictor_model loaded = {0};
+    if (flashmoe_predictor_model_load(&loaded, path)) {
+        model = loaded;
+        model.attempted = true;
+        model.loaded = true;
+        return &model;
+    }
+    flashmoe_predictor_model_free(&loaded);
+    model.loaded = false;
+    model.attempted = true;
+    fprintf(stderr, "ds4: failed to load FlashMoE predictor JSON from %s\n", path);
+    return NULL;
+}
+
+static float flashmoe_predictor_score(const ds4_flashmoe_predictor_model *m, const float *feat) {
+    if (!m || !feat) return 0.0f;
+    float hidden[128];
+    if (m->hidden_dim > sizeof(hidden) / sizeof(hidden[0])) return 0.0f;
+    for (size_t i = 0; i < m->hidden_dim; i++) {
+        float acc = m->b1[i];
+        const float *row = m->w1 + i * m->input_dim;
+        for (size_t j = 0; j < m->input_dim; j++) acc += row[j] * feat[j];
+        hidden[i] = acc > 0.0f ? acc : 0.0f;
+    }
+    float out = m->b2[0];
+    for (size_t i = 0; i < m->hidden_dim; i++) out += m->w2[i] * hidden[i];
+    return out;
+}
+
 static uint32_t flashmoe_decode_slot_count(void) {
     static uint32_t cache = 0;
     if (cache != 0) return cache;
@@ -4507,6 +4926,123 @@ static bool flashmoe_write_slot_tensor_run(ds4_gpu_tensor *base,
     if (!base || !src || slot_count == 0) return false;
     const uint64_t run_bytes = slot_bytes * (uint64_t)slot_count;
     return ds4_gpu_tensor_write(base, start_slot * slot_bytes, src, run_bytes) != 0;
+}
+
+static uint32_t flashmoe_decode_layer_resident_count(const ds4_gpu_graph *g, uint32_t il, uint32_t slot_count) {
+    uint32_t resident = 0;
+    for (uint32_t i = 0; i < slot_count; i++) {
+        if (g->flashmoe_decode_slot_valid[il][i]) resident++;
+    }
+    return resident;
+}
+
+static double flashmoe_decode_candidate_score(
+        const ds4_gpu_graph *g,
+        uint32_t il,
+        uint32_t slot,
+        uint32_t slot_count,
+        uint64_t step,
+        ds4_flashmoe_evict_policy policy) {
+    const uint64_t last_touch = g->flashmoe_decode_slot_last_touch[il][slot];
+    const uint64_t insert_step = g->flashmoe_decode_slot_insert_step[il][slot];
+    const uint32_t access_count = g->flashmoe_decode_slot_access_count[il][slot];
+    if (policy == DS4_FLASHMOE_EVICT_LRU) {
+        return (double)(step >= last_touch ? step - last_touch : 0u);
+    }
+    if (policy == DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY) {
+        uint32_t max_access = 1;
+        for (uint32_t i = 0; i < slot_count; i++) {
+            if (g->flashmoe_decode_slot_valid[il][i] &&
+                g->flashmoe_decode_slot_access_count[il][i] > max_access) {
+                max_access = g->flashmoe_decode_slot_access_count[il][i];
+            }
+        }
+        const double recency = (double)(step >= last_touch ? step - last_touch : 0u);
+        const double frequency = (double)access_count / (double)max_access;
+        const double layer_pressure = (double)flashmoe_decode_layer_resident_count(g, il, slot_count) /
+                                      (double)(slot_count ? slot_count : 1u);
+        return 0.70 * recency - 0.30 * frequency + 0.10 * layer_pressure;
+    }
+    if (policy == DS4_FLASHMOE_EVICT_PREDICTOR) {
+        ds4_flashmoe_predictor_model *m = flashmoe_predictor_model_get();
+        if (!m) {
+            return flashmoe_decode_candidate_score(
+                    g, il, slot, slot_count, step,
+                    DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY);
+        }
+        uint32_t max_access = 1;
+        for (uint32_t i = 0; i < slot_count; i++) {
+            if (g->flashmoe_decode_slot_valid[il][i] &&
+                g->flashmoe_decode_slot_access_count[il][i] > max_access) {
+                max_access = g->flashmoe_decode_slot_access_count[il][i];
+            }
+        }
+        float feat[16] = {0};
+        for (size_t i = 0; i < m->feature_count; i++) {
+            switch (m->feature_ids[i]) {
+                case DS4_FLASHMOE_FEAT_RECENCY:
+                    feat[i] = (float)(step >= last_touch ? step - last_touch : 0u);
+                    break;
+                case DS4_FLASHMOE_FEAT_FREQUENCY:
+                    feat[i] = (float)access_count / (float)max_access;
+                    break;
+                case DS4_FLASHMOE_FEAT_SIZE_RATIO:
+                    feat[i] = 1.0f;
+                    break;
+                case DS4_FLASHMOE_FEAT_LAYER_PRESSURE:
+                    feat[i] = (float)flashmoe_decode_layer_resident_count(g, il, slot_count) /
+                              (float)(slot_count ? slot_count : 1u);
+                    break;
+                case DS4_FLASHMOE_FEAT_IS_PREFETCHED:
+                    feat[i] = g->flashmoe_decode_slot_prefetched[il][slot] ? 1.0f : 0.0f;
+                    break;
+                case DS4_FLASHMOE_FEAT_SLOT_AGE:
+                    feat[i] = (float)(step >= insert_step ? step - insert_step : 0u);
+                    break;
+            }
+        }
+        return flashmoe_predictor_score(m, feat);
+    }
+    return 0.0;
+}
+
+static uint32_t flashmoe_decode_select_victim_slot(
+        const ds4_gpu_graph *g,
+        uint32_t il,
+        uint32_t slot_count,
+        const uint32_t *used_slots,
+        uint32_t used_count,
+        uint64_t step) {
+    const ds4_flashmoe_evict_policy policy = flashmoe_decode_evict_policy();
+    if (policy == DS4_FLASHMOE_EVICT_ROUND_ROBIN) {
+        for (uint32_t attempt = 0; attempt < slot_count; attempt++) {
+            const uint32_t probe = (g->flashmoe_decode_next_slot[il] + attempt) % slot_count;
+            bool already_used = false;
+            for (uint32_t u = 0; u < used_count; u++) {
+                if (used_slots[u] == probe) { already_used = true; break; }
+            }
+            if (!already_used) return probe;
+        }
+        return g->flashmoe_decode_next_slot[il] % slot_count;
+    }
+    double best_score = -DBL_MAX;
+    uint32_t best_slot = slot_count;
+    for (uint32_t probe = 0; probe < slot_count; probe++) {
+        bool already_used = false;
+        for (uint32_t u = 0; u < used_count; u++) {
+            if (used_slots[u] == probe) { already_used = true; break; }
+        }
+        if (already_used || !g->flashmoe_decode_slot_valid[il][probe]) continue;
+        const double score = flashmoe_decode_candidate_score(g, il, probe, slot_count, step, policy);
+        if (best_slot == slot_count || score > best_score) {
+            best_score = score;
+            best_slot = probe;
+        }
+    }
+    if (best_slot == slot_count) {
+        return g->flashmoe_decode_next_slot[il] % slot_count;
+    }
+    return best_slot;
 }
 
 #endif
@@ -9227,7 +9763,12 @@ typedef struct ds4_gpu_graph {
     int32_t flashmoe_decode_slot_expert[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
     uint8_t flashmoe_decode_slot_valid[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
     int16_t flashmoe_decode_expert_slot[DS4_N_LAYER][DS4_N_EXPERT];
+    uint64_t flashmoe_decode_slot_last_touch[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
+    uint32_t flashmoe_decode_slot_access_count[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
+    uint64_t flashmoe_decode_slot_insert_step[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
+    uint8_t flashmoe_decode_slot_prefetched[DS4_N_LAYER][DS4_FLASHMOE_DECODE_SLOT_CAP];
     uint32_t flashmoe_decode_next_slot[DS4_N_LAYER];
+    uint64_t flashmoe_decode_step;
     uint64_t flashmoe_gate_w_bytes;
     uint64_t flashmoe_up_w_bytes;
     uint64_t flashmoe_down_w_bytes;
@@ -9315,6 +9856,10 @@ static bool flashmoe_decode_prepare_slot_cache(
         for (uint32_t i = 0; i < DS4_FLASHMOE_DECODE_SLOT_CAP; i++) {
             g->flashmoe_decode_slot_valid[il][i] = 0u;
             g->flashmoe_decode_slot_expert[il][i] = -1;
+            g->flashmoe_decode_slot_last_touch[il][i] = 0u;
+            g->flashmoe_decode_slot_access_count[il][i] = 0u;
+            g->flashmoe_decode_slot_insert_step[il][i] = 0u;
+            g->flashmoe_decode_slot_prefetched[il][i] = 0u;
         }
         for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
             g->flashmoe_decode_expert_slot[il][expert] = -1;
@@ -9351,8 +9896,12 @@ static bool flashmoe_decode_prepare_slot_cache(
                                         &active_count)) {
         return false;
     }
+    if (active_count != 0 && flashmoe_cache_trace_path()) {
+        flashmoe_cache_trace_append(g->flashmoe_decode_layers, il, active_global, active_count);
+    }
 
     for (uint32_t i = 0; i < active_count; i++) {
+        const uint64_t step = ++g->flashmoe_decode_step;
         int32_t slot_index = g->flashmoe_decode_expert_slot[il][active_global[i]];
         if (slot_index >= 0) {
             const uint32_t slot = (uint32_t)slot_index;
@@ -9364,6 +9913,9 @@ static bool flashmoe_decode_prepare_slot_cache(
             }
         }
         if (slot_index >= 0) {
+            const uint32_t slot = (uint32_t)slot_index;
+            g->flashmoe_decode_slot_last_touch[il][slot] = step;
+            g->flashmoe_decode_slot_access_count[il][slot] += 1u;
             if (flashmoe_timing_enabled()) {
                 g->flashmoe_decode_used = true;
                 g->flashmoe_decode_hits += 1u;
@@ -9385,21 +9937,7 @@ static bool flashmoe_decode_prepare_slot_cache(
                 }
             }
             if (slot == slot_count) {
-                for (uint32_t attempt = 0; attempt < slot_count; attempt++) {
-                    const uint32_t probe = (g->flashmoe_decode_next_slot[il] + attempt) % slot_count;
-                    bool already_used = false;
-                    for (uint32_t u = 0; u < used_count; u++) {
-                        if (used_slots[u] == probe) {
-                            already_used = true;
-                            break;
-                        }
-                    }
-                    if (!already_used) {
-                        slot = probe;
-                        break;
-                    }
-                }
-                if (slot == slot_count) slot = g->flashmoe_decode_next_slot[il] % slot_count;
+                slot = flashmoe_decode_select_victim_slot(g, il, slot_count, used_slots, used_count, step);
                 g->flashmoe_decode_next_slot[il] = (slot + 1u) % slot_count;
             }
             if (g->flashmoe_decode_slot_valid[il][slot]) {
@@ -9474,6 +10012,10 @@ static bool flashmoe_decode_prepare_slot_cache(
             g->flashmoe_decode_slot_valid[il][slot] = 1u;
             g->flashmoe_decode_slot_expert[il][slot] = miss_experts[i];
             g->flashmoe_decode_expert_slot[il][miss_experts[i]] = (int16_t)slot;
+            g->flashmoe_decode_slot_last_touch[il][slot] = g->flashmoe_decode_step;
+            g->flashmoe_decode_slot_access_count[il][slot] = 1u;
+            g->flashmoe_decode_slot_insert_step[il][slot] = g->flashmoe_decode_step;
+            g->flashmoe_decode_slot_prefetched[il][slot] = 0u;
         }
     }
 
@@ -10206,6 +10748,10 @@ static bool metal_graph_alloc_raw_cap(
         for (uint32_t i = 0; i < DS4_FLASHMOE_DECODE_SLOT_CAP; i++) {
             g->flashmoe_decode_slot_valid[il][i] = 0u;
             g->flashmoe_decode_slot_expert[il][i] = -1;
+            g->flashmoe_decode_slot_last_touch[il][i] = 0u;
+            g->flashmoe_decode_slot_access_count[il][i] = 0u;
+            g->flashmoe_decode_slot_insert_step[il][i] = 0u;
+            g->flashmoe_decode_slot_prefetched[il][i] = 0u;
         }
         for (uint32_t expert = 0; expert < DS4_N_EXPERT; expert++) {
             g->flashmoe_decode_expert_slot[il][expert] = -1;
@@ -17049,6 +17595,7 @@ static int generate_metal_graph_raw_swa(
     g.flashmoe_decode_layers = 0;
     g.flashmoe_decode_hits = 0;
     g.flashmoe_decode_misses = 0;
+    g.flashmoe_decode_step = 0;
     g.flashmoe_decode_router_s = 0.0;
     g.flashmoe_decode_host_s = 0.0;
     g.flashmoe_decode_upload_s = 0.0;

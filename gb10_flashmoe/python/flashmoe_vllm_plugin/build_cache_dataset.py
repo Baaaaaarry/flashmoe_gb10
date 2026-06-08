@@ -36,7 +36,7 @@ def load_trace(path: Path) -> list[Access]:
     return accesses
 
 
-def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int) -> None:
+def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int, per_layer_cache_entries: int) -> None:
     accesses = load_trace(trace_path)
     future_positions: dict[tuple[int, int], list[int]] = {}
     for access in accesses:
@@ -44,6 +44,7 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int) -> Non
 
     resident: dict[tuple[int, int], Meta] = {}
     layer_counts: dict[int, int] = {}
+    resident_by_layer: dict[int, dict[tuple[int, int], Meta]] = {}
 
     fieldnames = [
         "recency",
@@ -62,27 +63,31 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int) -> Non
         while positions and positions[0] <= access.step:
             positions.pop(0)
 
-        if key in resident:
-            meta = resident[key]
+        layer_resident = resident_by_layer.setdefault(access.layer, {})
+        scope = layer_resident if per_layer_cache_entries > 0 else resident
+        limit = per_layer_cache_entries if per_layer_cache_entries > 0 else cache_entries
+
+        if key in scope:
+            meta = scope[key]
             meta.last_touch = access.step
             meta.access_count += 1
             continue
 
-        if len(resident) >= cache_entries:
+        if len(scope) >= limit:
             future_distance: dict[tuple[int, int], float] = {}
-            for cand_key, meta in resident.items():
+            for cand_key, meta in scope.items():
                 cand_positions = future_positions.get(cand_key, [])
                 next_use = cand_positions[0] if cand_positions else float("inf")
                 future_distance[cand_key] = next_use - access.step if next_use != float("inf") else 1e9
 
             victim = max(future_distance, key=future_distance.get)
-            max_access = max(item.access_count for item in resident.values())
-            for cand_key, meta in resident.items():
+            max_access = max(item.access_count for item in scope.values())
+            for cand_key, meta in scope.items():
                 recency = float(access.step - meta.last_touch)
                 frequency = float(meta.access_count) / float(max_access or 1)
                 reuse_distance = float(future_distance[cand_key])
                 size_ratio = 1.0
-                layer_pressure = float(layer_counts.get(cand_key[0], 0)) / float(max(len(resident), 1))
+                layer_pressure = float(layer_counts.get(cand_key[0], 0)) / float(max(limit, 1))
                 rows.append({
                     "recency": recency,
                     "frequency": frequency,
@@ -94,9 +99,14 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int) -> Non
                 })
 
             layer_counts[victim[0]] -= 1
-            del resident[victim]
+            del scope[victim]
+            if per_layer_cache_entries == 0:
+                resident_by_layer[victim[0]].pop(victim, None)
+            else:
+                resident.pop(victim, None)
 
         resident[key] = Meta(last_touch=access.step, access_count=1, layer_pressure=layer_counts.get(access.layer, 0) + 1)
+        layer_resident[key] = resident[key]
         layer_counts[access.layer] = layer_counts.get(access.layer, 0) + 1
 
     with output_csv.open("w", newline="") as handle:
@@ -110,8 +120,9 @@ def main() -> None:
     parser.add_argument("--trace", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cache-entries", type=int, default=16384)
+    parser.add_argument("--per-layer-cache-entries", type=int, default=0)
     args = parser.parse_args()
-    build_dataset(args.trace, args.output, args.cache_entries)
+    build_dataset(args.trace, args.output, args.cache_entries, args.per_layer_cache_entries)
 
 
 if __name__ == "__main__":
