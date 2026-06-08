@@ -509,9 +509,239 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 - miss expert 的 host 侧组织成本
 - 冷态 `SSD -> page cache` 的 direct-read 成本
 
+#### 7.2.1 GPU direct `blob-slot` 方案：做了什么
+
+当前 decode 主路径已经从早期的：
+
+- `SSD / page cache -> host_pack(gate/up/down) -> H2D upload -> GPU external_tensor kernel`
+
+推进到：
+
+- `SSD / page cache -> host_blob -> H2D fill GPU blob slots -> GPU kernel direct consume`
+
+具体实现上做了四件事：
+
+1. **每层预分配 GPU blob slots**
+   - 由 `DS4_FLASHMOE_DECODE_SLOT_COUNT` 控制
+   - slot 中保存的是完整 expert blob，而不是临时拆好的 `gate/up/down`
+
+2. **decode miss 只填缺的 expert**
+   - 命中的 expert 继续留在 GPU slot cache 中
+   - miss experts 才从 `layer-pack v2` 或 host 热缓存中取出并写入对应 slot
+
+3. **kernel 改成按 `slot + stride + offset` 直接读**
+   - 不再在 decode 阶段先 gather 成三块 `gate/up/down` GPU tensor
+   - 这一步把 decode 的 H2D 粒度从“整组专家张量上传”降成“只写 miss blobs”
+
+4. **prefill 保持稳定路径不动**
+   - prefill 继续使用已验证成立的流式读、并行读、GPU staging 复用
+   - GPU direct 方案主要影响的是 decode，不是 prefill
+
+这个方案的核心不是“让 GPU 直接读文件”，而是：
+
+- **让 GPU 直接读 GPU 常驻的 external pack 表示**
+- CPU/host 只负责处理 miss expert 的最小补数路径
+
+当前 slot cache 的真实参数是：
+
+- `DS4_FLASHMOE_DECODE_SLOT_COUNT`
+  - 默认值：`6`
+  - 最小值：`6`
+  - 最大值：`128`
+- 单个 expert blob：
+  - `7,077,888 Bytes`
+  - 约 `6.75 MiB`
+
+所以每层 decode `blob-slot` cache 的理论开销约为：
+
+- `6 slots`：约 `40.5 MiB / layer`
+- `128 slots`：约 `864 MiB / layer`
+
+按 `43` 层估算，全局 decode slot cache 的理论上界约为：
+
+- `6 slots`：约 `1.70 GiB`
+- `128 slots`：约 `35.86 GiB`
+
+这部分是**启动时一次性预分配**，不是运行中随着 miss 次数线性增长。
+
+#### 7.2.2 GPU direct `blob-slot` 方案：数据流变化
+
+与稳定版 FlashMoE 相比，GPU direct 方案的关键数据流变化如下：
+
+1. **稳定版 FlashMoE decode**
+   - GPU router
+   - `selected/weights` 回 CPU
+   - CPU 侧把当前层需要的 `gate/up/down` 整组组织出来
+   - H2D 上传三块 external tensors
+   - GPU kernel 计算
+
+2. **GPU direct `blob-slot` decode**
+   - GPU router
+   - `selected/weights` 回 CPU
+   - CPU 只组织 miss experts 的完整 blob
+   - H2D 只填 GPU `blob slots`
+   - GPU kernel 直接按 `blob_slots + slot/stride` 取权重
+
+其中：
+
+- **hit**
+  - 条件：当前层存在 `slot_valid=1 && slot_expert==active_expert_id`
+  - 数据路径：
+    - GPU router
+    - `selected/weights` 回 CPU
+    - CPU 命中已有 slot
+    - 无额外 blob 读取
+    - 无额外 slot 填充
+    - GPU kernel 直接消费现有 `blob_slots`
+
+- **miss**
+  - 条件：当前层所有 valid slots 中都找不到该 active expert
+  - 数据路径：
+    - GPU router
+    - `selected/weights` 回 CPU
+    - CPU 决定 miss experts
+    - 从 `layer-pack v2` 读取完整 blob 到 `blob_host`
+    - H2D 只填 missing blob slots
+    - GPU kernel 直接消费更新后的 `blob_slots`
+
+也就是说，当前 decode 已经不再受：
+
+- `gate/up/down gather`
+- 整组 external tensor upload
+
+这两类中间态束缚。新的 decode 主瓶颈已经转移到：
+
+- `router_readback`
+- `host_pack`
+
+#### 7.2.3 GPU direct `blob-slot` 方案：实测收益
+
+在**同口径 direct decode 路径**下，关键收益已经可以量化：
+
+- decode `h2d_write`
+  - 从约 `269 ms`
+  - 降到约 `146 ms`
+
+- generation
+  - 从约 `2.91 t/s`
+  - 提升到约 `3.45 t/s`
+
+在 `CLI cold/warm spot-check` 口径下：
+
+- 冷启动：
+  - `prefill: 2.36 t/s`
+  - `decode: 3.35 t/s`
+  - `prefill read ≈ 5616 ms`
+  - `decode host_pack ≈ 1744 ms`
+
+- 热启动：
+  - `prefill: 8.87 t/s`
+  - `decode: 7.42 t/s`
+  - `prefill read ≈ 633 ms`
+  - `decode host_pack ≈ 435 ms`
+
+这说明 GPU direct `blob-slot` 路线已经不只是“控制面接通”，而是：
+
+- **正确性已恢复**
+- **decode 主路径真实缩短**
+- **H2D 已经被明显压缩**
+
+#### 7.2.4 GPU direct `blob-slot` 方案：为什么还没有接近原生 ds4
+
+虽然 GPU direct 已经带来收益，但它还没有接近原生 `ds4` 的 decode 水平，原因现在也比较清楚：
+
+1. **`host_pack` 仍然很重**
+   - direct `blob-slot` 去掉的是 gather 和整组 upload
+   - 但 miss experts 的 host 侧组织仍然存在
+
+2. **`router_readback` 仍然是固定成本**
+   - 目前 decode 仍然需要把 `selected/weights` 从 GPU 回读到 CPU 再做 miss path 决策
+
+3. **冷/热差异仍然显著**
+   - 冷启动更受 `SSD -> page cache` 影响
+   - 热启动更多受 `host_pack` 本身影响
+
+4. **slot 数增大不是决定性因素**
+   - 当前实测表明：单纯把 GPU slot 数从默认值扩大到更高上限，并没有显著改变命中率和 TPS
+   - 说明 decode 的 expert 时间局部性有限，不能只靠堆缓存容量逼近原生 resident 路径
+
+因此，GPU direct 方案当前的工程意义可以概括为：
+
+- 它已经证明“让 GPU 直接消费 external pack”这条路线是成立的
+- 但下一阶段性能提升的关键，不在 kernel，而在继续压缩：
+  - `host_pack`
+  - `router_readback`
+  - 冷态 direct-read 成本
+
+#### 7.2.5 GPU direct `blob-slot` 方案：对应测试方法
+
+为了避免把不同口径的数字混写，当前推荐固定两组测试。
+
+1. **同口径 direct decode 路径对比**
+   - 用于比较 `DS4_FLASHMOE_DECODE_BLOB_SLOT=0/1`
+   - 关注：
+     - `flashmoe decode summary`
+     - `h2d_write`
+     - `generation`
+
+2. **CLI cold/warm spot-check**
+   - 同一配置连续运行两次
+   - 第一次记为 `cold`
+   - 第二次记为 `warm`
+   - 关注：
+     - `flashmoe prefill summary`
+     - `flashmoe decode summary`
+     - `prefill`
+     - `generation`
+
+推荐命令：
+
+```bash
+export DS4_MOE_BACKEND=flashmoe
+export DS4_FLASHMOE_MANIFEST=/path/to/expert_manifest.json
+export DS4_FLASHMOE_EXPERT_ROOT=/path/to/experts
+export DS4_FLASHMOE_CACHE_LIMIT_GB=4
+export DS4_FLASHMOE_TIMING=1
+export DS4_FLASHMOE_DECODE_BLOB_SLOT=1
+unset DS4_FLASHMOE_DECODE_COMPARE
+unset DS4_FLASHMOE_TRACE
+unset DS4_FLASHMOE_IO_THREADS
+
+./ds4 \
+  -m ./gguf/DeepSeek-v4-Flash.gguf \
+  --cuda \
+  --ctx 4096 \
+  --nothink \
+  --temp 0 \
+  -n 32 \
+  -p "Explain FlashMoE in one paragraph, focusing on SSD expert streaming, cache behavior, and expert execution." \
+  2> /tmp/ds4_flashmoe_perf.log
+```
+
+提取方式：
+
+```bash
+rg "flashmoe prefill summary|flashmoe decode summary|prefill:|generation:" /tmp/ds4_flashmoe_perf.log
+```
+
 ### 7.3 当前实测口径
 
-在 direct `blob-slot` 路径下，当前应明确区分冷启动与热启动：
+在 direct `blob-slot` 路径下，当前至少要区分两套不同 benchmark 口径，不能混写：
+
+1. **CLI 单次 cold/warm spot-check**
+2. **HOT E2E frontier benchmark**
+
+前者用于说明：
+
+- 首次运行与热缓存运行的差异
+- page cache / GPU slot cache / host_pack 的冷热效应
+
+后者用于说明：
+
+- 长上下文、多 frontier 下的增量 prefill / generation
+- 更接近“持续运行中的热态系统”表现
+
+#### 7.3.1 CLI 单次 cold/warm spot-check
 
 - 冷启动：
   - `prefill: 2.36 t/s`
@@ -537,7 +767,34 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 - `cold`
 - `warm`
 
-后续任何汇报或 benchmark 都必须明确区分这两者。
+#### 7.3.2 HOT E2E frontier benchmark
+
+`HOT E2E` 脚本与上面的 CLI 单次测试不是同一口径。  
+它使用的是：
+
+- 一个已加载模型
+- 一个共享长 prompt
+- 多个 context frontier
+- `incremental prefill`
+
+因此它统计的 `prefill_tps` 是：
+
+- **每个 frontier 上“新增 token 区间”的增量 prefill 吞吐**
+
+而不是：
+
+- 从 0 开始、第一次把整段 prompt 首次灌入模型时的总平均 prefill 吞吐
+
+所以在 `HOT E2E` 图表里看到的 prefill 往往会远高于：
+
+- CLI 单次 cold/warm spot-check 的 `2.36 -> 8.87 t/s`
+
+这不是回归，也不是实现矛盾，而是**统计口径不同**。
+
+后续任何汇报或 benchmark 都必须明确区分：
+
+- `CLI cold/warm spot-check`
+- `HOT E2E frontier`
 
 ### 7.4 下一步真正决定成败的事
 

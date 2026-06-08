@@ -10151,7 +10151,7 @@ static bool metal_graph_alloc_raw_cap(
         if (flashmoe_decode_gpu_cache_enabled()) {
             const uint32_t decode_slots = flashmoe_decode_slot_count();
             g->flashmoe_decode_blob_slots[il] =
-                    ds4_gpu_tensor_alloc((uint64_t)decode_slots * blob_exp_bytes);
+                    ds4_gpu_tensor_alloc_mapped_host((uint64_t)decode_slots * blob_exp_bytes);
             g->flashmoe_decode_selected_gpu[il] =
                     ds4_gpu_tensor_alloc((uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t));
             g->flashmoe_decode_next_slot[il] = 0;
@@ -17051,7 +17051,7 @@ static int generate_metal_graph_raw_swa(
     const double decode_s = t_decode1 - t_decode0;
     if (flashmoe_timing_enabled() && g.flashmoe_decode_used) {
         fprintf(stderr,
-                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " router_readback=%.3fms host_pack=%.3fms h2d_write=%.3fms routed_kernel=%.3fms dense_shared_other=%.3fms\n",
+                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " router_readback=%.3fms host_pack=%.3fms slot_write=%.3fms routed_kernel=%.3fms dense_shared_other=%.3fms\n",
                 g.flashmoe_decode_layers,
                 g.flashmoe_decode_hits,
                 g.flashmoe_decode_misses,
