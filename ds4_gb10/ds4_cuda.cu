@@ -39,15 +39,8 @@ enum {
 
 struct ds4_gpu_tensor {
     void *ptr;
-    void *host_ptr;
     uint64_t bytes;
     int owner;
-};
-
-enum {
-    DS4_GPU_TENSOR_OWNER_NONE = 0,
-    DS4_GPU_TENSOR_OWNER_DEVICE = 1,
-    DS4_GPU_TENSOR_OWNER_MAPPED_HOST = 2,
 };
 
 typedef struct {
@@ -1307,29 +1300,7 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc(uint64_t bytes) {
         return NULL;
     }
     t->bytes = bytes;
-    t->owner = DS4_GPU_TENSOR_OWNER_DEVICE;
-    return t;
-}
-
-extern "C" ds4_gpu_tensor *ds4_gpu_tensor_alloc_mapped_host(uint64_t bytes) {
-    if (bytes == 0) bytes = 1;
-    ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
-    if (!t) return NULL;
-    void *host = NULL;
-    if (!cuda_ok(cudaHostAlloc(&host, (size_t)bytes, cudaHostAllocMapped), "tensor alloc mapped host")) {
-        free(t);
-        return NULL;
-    }
-    void *dev = NULL;
-    if (!cuda_ok(cudaHostGetDevicePointer(&dev, host, 0), "tensor mapped host ptr")) {
-        (void)cudaFreeHost(host);
-        free(t);
-        return NULL;
-    }
-    t->ptr = dev;
-    t->host_ptr = host;
-    t->bytes = bytes;
-    t->owner = DS4_GPU_TENSOR_OWNER_MAPPED_HOST;
+    t->owner = 1;
     return t;
 }
 
@@ -1338,19 +1309,14 @@ extern "C" ds4_gpu_tensor *ds4_gpu_tensor_view(const ds4_gpu_tensor *base, uint6
     ds4_gpu_tensor *t = (ds4_gpu_tensor *)calloc(1, sizeof(*t));
     if (!t) return NULL;
     t->ptr = (char *)base->ptr + offset;
-    t->host_ptr = base->host_ptr ? (char *)base->host_ptr + offset : NULL;
     t->bytes = bytes;
-    t->owner = DS4_GPU_TENSOR_OWNER_NONE;
+    t->owner = 0;
     return t;
 }
 
 extern "C" void ds4_gpu_tensor_free(ds4_gpu_tensor *tensor) {
     if (!tensor) return;
-    if (tensor->owner == DS4_GPU_TENSOR_OWNER_DEVICE && tensor->ptr) {
-        (void)cudaFree(tensor->ptr);
-    } else if (tensor->owner == DS4_GPU_TENSOR_OWNER_MAPPED_HOST && tensor->host_ptr) {
-        (void)cudaFreeHost(tensor->host_ptr);
-    }
+    if (tensor->owner && tensor->ptr) (void)cudaFree(tensor->ptr);
     free(tensor);
 }
 
@@ -1361,7 +1327,7 @@ extern "C" uint64_t ds4_gpu_tensor_bytes(const ds4_gpu_tensor *tensor) {
 extern "C" void *ds4_gpu_tensor_contents(ds4_gpu_tensor *tensor) {
     if (!tensor) return NULL;
     (void)cudaDeviceSynchronize();
-    return tensor->host_ptr ? tensor->host_ptr : tensor->ptr;
+    return tensor->ptr;
 }
 
 extern "C" int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint64_t count) {
@@ -1373,19 +1339,11 @@ extern "C" int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint
 
 extern "C" int ds4_gpu_tensor_write(ds4_gpu_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) {
     if (!tensor || !data || offset > tensor->bytes || bytes > tensor->bytes - offset) return 0;
-    if (tensor->host_ptr) {
-        memcpy((char *)tensor->host_ptr + offset, data, (size_t)bytes);
-        return 1;
-    }
     return cuda_ok(cudaMemcpy((char *)tensor->ptr + offset, data, (size_t)bytes, cudaMemcpyHostToDevice), "tensor write");
 }
 
 extern "C" int ds4_gpu_tensor_read(const ds4_gpu_tensor *tensor, uint64_t offset, void *data, uint64_t bytes) {
     if (!tensor || !data || offset > tensor->bytes || bytes > tensor->bytes - offset) return 0;
-    if (tensor->host_ptr) {
-        memcpy(data, (const char *)tensor->host_ptr + offset, (size_t)bytes);
-        return 1;
-    }
     return cuda_ok(cudaMemcpy(data, (const char *)tensor->ptr + offset, (size_t)bytes, cudaMemcpyDeviceToHost), "tensor read");
 }
 
@@ -1397,24 +1355,6 @@ extern "C" int ds4_gpu_tensor_copy(ds4_gpu_tensor *dst, uint64_t dst_offset,
         return 0;
     }
     if (bytes == 0) return 1;
-    if (dst->host_ptr && src->host_ptr) {
-        memmove((char *)dst->host_ptr + dst_offset, (const char *)src->host_ptr + src_offset, (size_t)bytes);
-        return 1;
-    }
-    if (dst->host_ptr && !src->host_ptr) {
-        return cuda_ok(cudaMemcpy((char *)dst->host_ptr + dst_offset,
-                                  (const char *)src->ptr + src_offset,
-                                  (size_t)bytes,
-                                  cudaMemcpyDeviceToHost),
-                       "tensor copy d2h");
-    }
-    if (!dst->host_ptr && src->host_ptr) {
-        return cuda_ok(cudaMemcpy((char *)dst->ptr + dst_offset,
-                                  (const char *)src->host_ptr + src_offset,
-                                  (size_t)bytes,
-                                  cudaMemcpyHostToDevice),
-                       "tensor copy h2d");
-    }
     return cuda_ok(cudaMemcpy((char *)dst->ptr + dst_offset,
                               (const char *)src->ptr + src_offset,
                               (size_t)bytes,
