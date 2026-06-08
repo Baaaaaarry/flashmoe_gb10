@@ -98,6 +98,14 @@ def points_to_polyline(points, x_min, x_max, y_max, plot):
     return " ".join(project(point) for point in points)
 
 
+def project_point(point, x_min, x_max, y_max, plot):
+    left, top, width, height = plot
+    x, y = point
+    px = left + (x - x_min) / (x_max - x_min) * width
+    py = top + height - y / y_max * height
+    return px, py
+
+
 def render_svg(rows, title, width, height):
     margin_left = 82
     margin_right = 82
@@ -137,6 +145,10 @@ def render_svg(rows, title, width, height):
     gen_points = [(row[0], row[2]) for row in rows]
     prefill_poly = points_to_polyline(prefill_points, x_min, x_max, prefill_max, plot)
     gen_poly = points_to_polyline(gen_points, x_min, x_max, gen_max, plot)
+    prefill_peak = max(prefill_points, key=lambda item: item[1])
+    gen_peak = max(gen_points, key=lambda item: item[1])
+    prefill_peak_px, prefill_peak_py = project_point(prefill_peak, x_min, x_max, prefill_max, plot)
+    gen_peak_px, gen_peak_py = project_point(gen_peak, x_min, x_max, gen_max, plot)
 
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -147,6 +159,7 @@ def render_svg(rows, title, width, height):
         ".axis-label { font-size: 14px; font-weight: 600; fill: #334155; }",
         ".tick { font-size: 12px; fill: #64748b; }",
         ".legend { font-size: 13px; font-weight: 600; fill: #1f2933; }",
+        ".peak-label { font-size: 12px; font-weight: 700; }",
         "</style>",
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
         f'<text class="title" x="{width / 2:.1f}" y="34" text-anchor="middle">{html.escape(title)}</text>',
@@ -178,6 +191,36 @@ def render_svg(rows, title, width, height):
             f'<text class="axis-label" x="{width - 22}" y="{top + plot_height / 2:.1f}" text-anchor="middle" transform="rotate(90 {width - 22} {top + plot_height / 2:.1f})">generation t/s</text>',
             f'<polyline fill="none" stroke="{PREFILL_COLOR}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" points="{prefill_poly}"/>',
             f'<polyline fill="none" stroke="{GEN_COLOR}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" points="{gen_poly}"/>',
+            f'<circle cx="{prefill_peak_px:.2f}" cy="{prefill_peak_py:.2f}" r="5" fill="{PREFILL_COLOR}" stroke="#ffffff" stroke-width="2"/>',
+            f'<circle cx="{gen_peak_px:.2f}" cy="{gen_peak_py:.2f}" r="5" fill="{GEN_COLOR}" stroke="#ffffff" stroke-width="2"/>',
+        ]
+    )
+
+    # Peak annotations.
+    prefill_label_dx = 10
+    prefill_label_dy = -12
+    prefill_anchor = "start"
+    if prefill_peak_px > right - 120:
+        prefill_label_dx = -10
+        prefill_anchor = "end"
+    if prefill_peak_py < top + 20:
+        prefill_label_dy = 18
+
+    gen_label_dx = 10
+    gen_label_dy = -12
+    gen_anchor = "start"
+    if gen_peak_px > right - 120:
+        gen_label_dx = -10
+        gen_anchor = "end"
+    if gen_peak_py < top + 20:
+        gen_label_dy = 18
+    if abs(gen_peak_px - prefill_peak_px) < 80 and abs(gen_peak_py - prefill_peak_py) < 28:
+        gen_label_dy += 18
+
+    parts.extend(
+        [
+            f'<text class="peak-label" x="{prefill_peak_px + prefill_label_dx:.2f}" y="{prefill_peak_py + prefill_label_dy:.2f}" text-anchor="{prefill_anchor}" fill="{PREFILL_COLOR}">peak {prefill_peak[1]:.2f} @ {fmt_tick(prefill_peak[0])}</text>',
+            f'<text class="peak-label" x="{gen_peak_px + gen_label_dx:.2f}" y="{gen_peak_py + gen_label_dy:.2f}" text-anchor="{gen_anchor}" fill="{GEN_COLOR}">peak {gen_peak[1]:.2f} @ {fmt_tick(gen_peak[0])}</text>',
         ]
     )
 
