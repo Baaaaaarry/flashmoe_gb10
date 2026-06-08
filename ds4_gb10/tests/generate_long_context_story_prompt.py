@@ -8,6 +8,7 @@ the spelled-out numbers to digits, and emit a parseable list.
 
 from __future__ import annotations
 
+import argparse
 import random
 from pathlib import Path
 
@@ -131,13 +132,13 @@ def assignment_sentence(name: str, word: str) -> str:
     )
 
 
-def make_story() -> str:
+def make_story(scene_count: int = 190) -> str:
     rng = random.Random(20260513)
     names = [name for name, _, _ in FACTS]
     fact_by_scene = {7 + i * 11: fact for i, fact in enumerate(FACTS)}
     scenes: list[str] = []
 
-    for scene_index in range(190):
+    for scene_index in range(scene_count):
         lead = rng.choice(names)
         friend = rng.choice([n for n in names if n != lead])
         template = SCENE_TEMPLATES[scene_index % len(SCENE_TEMPLATES)]
@@ -177,10 +178,9 @@ No bullets, no prose, no explanation.
     return OPENING + "\n".join(scenes) + question
 
 
-def main() -> None:
-    root = Path(__file__).resolve().parent
-    story = make_story()
-    rendered = (
+def render_story(scene_count: int) -> str:
+    story = make_story(scene_count=scene_count)
+    return (
         BOS
         + "You are a careful assistant. Read the story, remember the assignments, "
         + "and answer the final task exactly."
@@ -189,7 +189,53 @@ def main() -> None:
         + ASSISTANT
         + "</think>"
     )
-    (root / "long_context_story_prompt.txt").write_text(rendered, encoding="utf-8")
+
+
+def rough_token_estimate(text: str) -> int:
+    # Coarse estimate used elsewhere in the repo for large prompt corpora.
+    return max(1, len(text.encode("utf-8")) // 4)
+
+
+def build_prompt(min_tokens: int) -> str:
+    scene_count = 190
+    rendered = render_story(scene_count)
+    if min_tokens <= 0:
+        return rendered
+
+    # Grow geometrically first to avoid many rebuilds on very long targets.
+    while rough_token_estimate(rendered) < min_tokens:
+        scene_count = max(scene_count + 1, int(scene_count * 1.5))
+        rendered = render_story(scene_count)
+
+    # Tighten downward so we don't overshoot by a huge amount.
+    low = max(1, scene_count // 2)
+    high = scene_count
+    best = rendered
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = render_story(mid)
+        est = rough_token_estimate(candidate)
+        if est >= min_tokens:
+            best = candidate
+            high = mid - 1
+        else:
+            low = mid + 1
+    return best
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate the long-context fact-recall prompt used by ds4 tests.")
+    parser.add_argument("--min-tokens", type=int, default=0,
+                        help="Minimum rough token estimate for the output prompt (bytes/4 heuristic).")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output path. Defaults to tests/long_context_story_prompt.txt beside this script.")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parent
+    output = args.output if args.output is not None else (root / "long_context_story_prompt.txt")
+    rendered = build_prompt(args.min_tokens)
+    output.write_text(rendered, encoding="utf-8")
+    print(f"wrote {output} rough_tokens={rough_token_estimate(rendered)} bytes={len(rendered.encode('utf-8'))}")
 
 
 if __name__ == "__main__":
