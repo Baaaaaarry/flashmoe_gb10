@@ -4508,6 +4508,8 @@ static bool flashmoe_decode_blob_slot_enabled(void) {
 
 #define DS4_FLASHMOE_DECODE_SLOT_CAP 256u
 
+typedef struct ds4_gpu_graph ds4_gpu_graph;
+
 typedef enum {
     DS4_FLASHMOE_EVICT_ROUND_ROBIN = 0,
     DS4_FLASHMOE_EVICT_LRU = 1,
@@ -9598,7 +9600,7 @@ static void print_vec_stats(const char *name, const float *x, uint64_t n) {
  * tensor names follow the model stages rather than generic graph nodes.
  */
 
-typedef struct ds4_gpu_graph {
+struct ds4_gpu_graph {
     /* One-token decode tensors.  These stay allocated for the life of a
      * session; a generated token enters as an embedding in cur_hc and leaves as
      * logits after all 43 layers update their raw/compressed/indexer caches. */
@@ -9806,7 +9808,7 @@ typedef struct ds4_gpu_graph {
     float directional_steering_ffn_scale;
     bool quality;
     bool mtp_enabled;
-} ds4_gpu_graph;
+};
 
 #ifndef DS4_NO_GPU
 static bool flashmoe_decode_prepare_slot_cache(
