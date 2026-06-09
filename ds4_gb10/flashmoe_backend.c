@@ -387,12 +387,35 @@ typedef struct {
     uint64_t limit_bytes;
     uint64_t use_clock;
     bool ready;
+    pthread_t prefetch_thread;
+    pthread_mutex_t prefetch_mu;
+    pthread_cond_t prefetch_cv;
+    bool prefetch_thread_started;
+    bool prefetch_stop;
+    uint16_t *prefetch_layer_q;
+    uint16_t *prefetch_expert_q;
+    uint32_t prefetch_cap;
+    uint32_t prefetch_head;
+    uint32_t prefetch_tail;
+    uint32_t prefetch_count;
+    uint64_t prefetch_scratch_bytes;
 } ds4_flashmoe_runtime_state;
 
 static ds4_flashmoe_runtime_state g_runtime;
 
 static void runtime_reset(ds4_flashmoe_runtime_state *rt) {
     if (!rt) return;
+    if (rt->prefetch_thread_started) {
+        pthread_mutex_lock(&rt->prefetch_mu);
+        rt->prefetch_stop = true;
+        pthread_cond_broadcast(&rt->prefetch_cv);
+        pthread_mutex_unlock(&rt->prefetch_mu);
+        (void)pthread_join(rt->prefetch_thread, NULL);
+        pthread_cond_destroy(&rt->prefetch_cv);
+        pthread_mutex_destroy(&rt->prefetch_mu);
+    }
+    free(rt->prefetch_layer_q);
+    free(rt->prefetch_expert_q);
     for (size_t i = 0; i < rt->count; i++) {
         free(rt->entries[i].bytes);
     }
@@ -404,6 +427,53 @@ static void runtime_reset(ds4_flashmoe_runtime_state *rt) {
     free(rt->layer_fds);
     free(rt->entries);
     memset(rt, 0, sizeof(*rt));
+}
+
+static bool read_fully_at_fd(int fd, uint8_t *dst, uint64_t n, uint64_t off) {
+    uint64_t done = 0;
+    while (done < n) {
+        ssize_t got = pread(fd, dst + done, (size_t)(n - done), (off_t)(off + done));
+        if (got <= 0) return false;
+        done += (uint64_t)got;
+    }
+    return true;
+}
+
+static void *flashmoe_prefetch_worker_main(void *arg) {
+    ds4_flashmoe_runtime_state *rt = (ds4_flashmoe_runtime_state *)arg;
+    if (!rt || !rt->manifest) return NULL;
+    uint8_t *scratch = NULL;
+    if (rt->prefetch_scratch_bytes != 0) {
+        scratch = (uint8_t *)malloc((size_t)rt->prefetch_scratch_bytes);
+    }
+    while (true) {
+        uint16_t layer_id = 0, expert_id = 0;
+        pthread_mutex_lock(&rt->prefetch_mu);
+        while (!rt->prefetch_stop && rt->prefetch_count == 0) {
+            pthread_cond_wait(&rt->prefetch_cv, &rt->prefetch_mu);
+        }
+        if (rt->prefetch_stop) {
+            pthread_mutex_unlock(&rt->prefetch_mu);
+            break;
+        }
+        layer_id = rt->prefetch_layer_q[rt->prefetch_head];
+        expert_id = rt->prefetch_expert_q[rt->prefetch_head];
+        rt->prefetch_head = (rt->prefetch_head + 1u) % rt->prefetch_cap;
+        rt->prefetch_count--;
+        pthread_mutex_unlock(&rt->prefetch_mu);
+
+        const ds4_flashmoe_layer_pack *layer_pack =
+                ds4_flashmoe_manifest_find_layer(rt->manifest, layer_id);
+        if (!layer_pack || expert_id >= layer_pack->num_experts) continue;
+        if (layer_pack->expert_size == 0 || !scratch || layer_pack->expert_size > rt->prefetch_scratch_bytes) continue;
+        int fd = open(layer_pack->path, O_RDONLY);
+        if (fd < 0) continue;
+        const uint64_t base_offset = (uint64_t)expert_id * layer_pack->expert_size;
+        (void)read_fully_at_fd(fd, scratch, layer_pack->expert_size, base_offset);
+        close(fd);
+    }
+    free(scratch);
+    return NULL;
 }
 
 static ds4_flashmoe_blob_entry *runtime_find_blob(ds4_flashmoe_runtime_state *rt,
@@ -660,6 +730,29 @@ int ds4_flashmoe_runtime_open(const ds4_flashmoe_manifest *manifest,
     }
     for (size_t i = 0; i < manifest->count; i++) g_runtime.layer_fds[i] = -1;
     g_runtime.limit_bytes = cache_limit_bytes;
+    uint64_t max_expert_size = 0;
+    for (size_t i = 0; i < manifest->count; i++) {
+        if (manifest->layers[i].expert_size > max_expert_size) {
+            max_expert_size = manifest->layers[i].expert_size;
+        }
+    }
+    g_runtime.prefetch_scratch_bytes = max_expert_size;
+    g_runtime.prefetch_cap = 1024u;
+    g_runtime.prefetch_layer_q = (uint16_t *)calloc(g_runtime.prefetch_cap, sizeof(g_runtime.prefetch_layer_q[0]));
+    g_runtime.prefetch_expert_q = (uint16_t *)calloc(g_runtime.prefetch_cap, sizeof(g_runtime.prefetch_expert_q[0]));
+    if (!g_runtime.prefetch_layer_q || !g_runtime.prefetch_expert_q) {
+        runtime_reset(&g_runtime);
+        set_err(err, errlen, "out of memory allocating FlashMoE prefetch queue");
+        return 1;
+    }
+    if (pthread_mutex_init(&g_runtime.prefetch_mu, NULL) != 0 ||
+        pthread_cond_init(&g_runtime.prefetch_cv, NULL) != 0 ||
+        pthread_create(&g_runtime.prefetch_thread, NULL, flashmoe_prefetch_worker_main, &g_runtime) != 0) {
+        runtime_reset(&g_runtime);
+        set_err(err, errlen, "failed to start FlashMoE prefetch worker");
+        return 1;
+    }
+    g_runtime.prefetch_thread_started = true;
     g_runtime.ready = true;
     return 0;
 }
@@ -1076,5 +1169,37 @@ int ds4_flashmoe_runtime_load_selected_blobs(uint16_t layer_id,
     free(runs);
     free(sorted_out);
     free(sorted_ids);
+    return 0;
+}
+
+int ds4_flashmoe_runtime_enqueue_prefetch_blobs(uint16_t layer_id,
+                                                const uint16_t *expert_ids,
+                                                uint32_t n_experts,
+                                                char *err,
+                                                size_t errlen) {
+    if (!ds4_flashmoe_runtime_ready()) {
+        set_err(err, errlen, "FlashMoE runtime cache is not ready");
+        return 1;
+    }
+    if (!expert_ids || n_experts == 0) return 0;
+    const ds4_flashmoe_layer_pack *layer_pack =
+            ds4_flashmoe_manifest_find_layer(g_runtime.manifest, layer_id);
+    if (!layer_pack) {
+        set_err(err, errlen, "FlashMoE layer pack entry is missing");
+        return 1;
+    }
+    pthread_mutex_lock(&g_runtime.prefetch_mu);
+    for (uint32_t i = 0; i < n_experts; i++) {
+        const uint16_t expert_id = expert_ids[i];
+        if (expert_id >= layer_pack->num_experts) continue;
+        if (g_runtime.prefetch_count >= g_runtime.prefetch_cap) break;
+        uint32_t idx = g_runtime.prefetch_tail;
+        g_runtime.prefetch_layer_q[idx] = layer_id;
+        g_runtime.prefetch_expert_q[idx] = expert_id;
+        g_runtime.prefetch_tail = (g_runtime.prefetch_tail + 1u) % g_runtime.prefetch_cap;
+        g_runtime.prefetch_count++;
+    }
+    pthread_cond_signal(&g_runtime.prefetch_cv);
+    pthread_mutex_unlock(&g_runtime.prefetch_mu);
     return 0;
 }
