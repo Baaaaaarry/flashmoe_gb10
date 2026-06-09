@@ -4544,6 +4544,21 @@ typedef struct {
     float *b2;
 } ds4_flashmoe_predictor_model;
 
+typedef struct {
+    uint16_t layer;
+    uint16_t current_count;
+    uint16_t predicted_count;
+    uint16_t current[DS4_N_EXPERT_USED];
+    uint16_t predicted[16];
+} ds4_flashmoe_prefetch_rule;
+
+typedef struct {
+    bool attempted;
+    bool loaded;
+    size_t rule_count;
+    ds4_flashmoe_prefetch_rule *rules;
+} ds4_flashmoe_prefetch_model;
+
 static ds4_flashmoe_evict_policy flashmoe_decode_evict_policy(void) {
     static int cache = -1;
     if (cache != -1) return (ds4_flashmoe_evict_policy)cache;
@@ -4567,6 +4582,31 @@ static const char *flashmoe_cache_trace_path(void) {
     if (cache != (const char *)(uintptr_t)1u) return cache;
     const char *env = getenv("DS4_FLASHMOE_CACHE_TRACE");
     cache = (env && env[0]) ? env : NULL;
+    return cache;
+}
+
+static bool flashmoe_decode_prefetch_enabled(void) {
+    static int cache = -1;
+    if (cache == -1) {
+        const char *env = getenv("DS4_FLASHMOE_DECODE_PREFETCH");
+        cache = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
+    }
+    return cache != 0;
+}
+
+static uint32_t flashmoe_decode_prefetch_budget(void) {
+    static uint32_t cache = 0;
+    if (cache != 0) return cache;
+    const char *env = getenv("DS4_FLASHMOE_PREFETCH_BUDGET");
+    uint32_t count = 2;
+    if (env && env[0]) {
+        char *end = NULL;
+        unsigned long parsed = strtoul(env, &end, 10);
+        if (end && end != env && *end == '\0' && parsed <= 16ul) {
+            count = (uint32_t)parsed;
+        }
+    }
+    cache = count;
     return cache;
 }
 
@@ -4908,6 +4948,129 @@ static float flashmoe_predictor_score(const ds4_flashmoe_predictor_model *m, con
     float out = m->b2[0];
     for (size_t i = 0; i < m->hidden_dim; i++) out += m->w2[i] * hidden[i];
     return out;
+}
+
+static void flashmoe_prefetch_model_free(ds4_flashmoe_prefetch_model *m) {
+    if (!m) return;
+    free(m->rules);
+    memset(m, 0, sizeof(*m));
+}
+
+static bool flashmoe_parse_uint16_token(const char *s, uint16_t *out) {
+    if (!s || !*s) return false;
+    char *end = NULL;
+    unsigned long v = strtoul(s, &end, 10);
+    if (end == s || *end != '\0' || v > 65535ul) return false;
+    *out = (uint16_t)v;
+    return true;
+}
+
+static bool flashmoe_prefetch_model_load(ds4_flashmoe_prefetch_model *out, const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    ds4_flashmoe_prefetch_model m = {0};
+    size_t cap = 256;
+    m.rules = xcalloc(cap, sizeof(m.rules[0]));
+    char line[4096];
+    while (fgets(line, sizeof(line), fp)) {
+        char *row = line;
+        while (*row && isspace((unsigned char)*row)) row++;
+        if (!*row || *row == '#') continue;
+        char *tokv[64];
+        size_t ntok = 0;
+        char *save = NULL;
+        for (char *tok = strtok_r(row, " \t\r\n", &save);
+             tok && ntok < sizeof(tokv) / sizeof(tokv[0]);
+             tok = strtok_r(NULL, " \t\r\n", &save)) {
+            tokv[ntok++] = tok;
+        }
+        if (ntok < 3) goto fail;
+        ds4_flashmoe_prefetch_rule rule = {0};
+        if (!flashmoe_parse_uint16_token(tokv[0], &rule.layer) ||
+            !flashmoe_parse_uint16_token(tokv[1], &rule.current_count)) {
+            goto fail;
+        }
+        if (rule.current_count > DS4_N_EXPERT_USED) goto fail;
+        size_t need = 2u + (size_t)rule.current_count + 1u;
+        if (ntok < need) goto fail;
+        for (uint32_t i = 0; i < rule.current_count; i++) {
+            if (!flashmoe_parse_uint16_token(tokv[2u + i], &rule.current[i])) goto fail;
+        }
+        if (!flashmoe_parse_uint16_token(tokv[2u + rule.current_count], &rule.predicted_count)) goto fail;
+        if (rule.predicted_count > 16u) rule.predicted_count = 16u;
+        need = 3u + (size_t)rule.current_count + (size_t)rule.predicted_count;
+        if (ntok < need) goto fail;
+        for (uint32_t i = 0; i < rule.predicted_count; i++) {
+            if (!flashmoe_parse_uint16_token(tokv[3u + rule.current_count + i], &rule.predicted[i])) goto fail;
+        }
+        if (m.rule_count == cap) {
+            cap *= 2u;
+            m.rules = xrealloc(m.rules, cap * sizeof(m.rules[0]));
+        }
+        m.rules[m.rule_count++] = rule;
+    }
+    fclose(fp);
+    *out = m;
+    out->attempted = true;
+    out->loaded = true;
+    return true;
+fail:
+    fclose(fp);
+    flashmoe_prefetch_model_free(&m);
+    return false;
+}
+
+static ds4_flashmoe_prefetch_model *flashmoe_prefetch_model_get(void) {
+    static ds4_flashmoe_prefetch_model model = {0};
+    if (model.attempted) return model.loaded ? &model : NULL;
+    model.attempted = true;
+    const char *path = getenv("DS4_FLASHMOE_PREFETCH_MODEL");
+    if (!path || !path[0]) return NULL;
+    ds4_flashmoe_prefetch_model loaded = {0};
+    if (flashmoe_prefetch_model_load(&loaded, path)) {
+        model = loaded;
+        model.attempted = true;
+        model.loaded = true;
+        return &model;
+    }
+    flashmoe_prefetch_model_free(&loaded);
+    model.loaded = false;
+    model.attempted = true;
+    fprintf(stderr, "ds4: failed to load FlashMoE prefetch model from %s\n", path);
+    return NULL;
+}
+
+static int flashmoe_u16_cmp(const void *a, const void *b) {
+    const uint16_t av = *(const uint16_t *)a;
+    const uint16_t bv = *(const uint16_t *)b;
+    return (av > bv) - (av < bv);
+}
+
+static uint32_t flashmoe_canonicalize_expert_set(const uint16_t *src, uint32_t count, uint16_t *dst) {
+    if (!src || !dst || count == 0) return 0;
+    memcpy(dst, src, count * sizeof(dst[0]));
+    qsort(dst, count, sizeof(dst[0]), flashmoe_u16_cmp);
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (out == 0 || dst[out - 1] != dst[i]) dst[out++] = dst[i];
+    }
+    return out;
+}
+
+static const ds4_flashmoe_prefetch_rule *flashmoe_prefetch_rule_lookup(
+        const ds4_flashmoe_prefetch_model *m,
+        uint32_t layer,
+        const uint16_t *current,
+        uint32_t current_count) {
+    if (!m || !current || current_count == 0) return NULL;
+    uint16_t key[DS4_N_EXPERT_USED];
+    current_count = flashmoe_canonicalize_expert_set(current, current_count, key);
+    for (size_t i = 0; i < m->rule_count; i++) {
+        const ds4_flashmoe_prefetch_rule *rule = &m->rules[i];
+        if (rule->layer != layer || rule->current_count != current_count) continue;
+        if (memcmp(rule->current, key, current_count * sizeof(key[0])) == 0) return rule;
+    }
+    return NULL;
 }
 
 static uint32_t flashmoe_decode_slot_count(void) {
@@ -9686,6 +9849,8 @@ struct ds4_gpu_graph {
     uint64_t flashmoe_decode_layers;
     uint64_t flashmoe_decode_hits;
     uint64_t flashmoe_decode_misses;
+    uint64_t flashmoe_decode_prefetches;
+    uint64_t flashmoe_decode_prefetch_hits;
     double flashmoe_decode_router_s;
     double flashmoe_decode_host_s;
     double flashmoe_decode_upload_s;
@@ -9835,6 +10000,137 @@ static uint32_t flashmoe_decode_select_victim_slot(
     return best_slot;
 }
 
+static bool flashmoe_decode_prefetch_slots(
+        ds4_gpu_graph *g,
+        const ds4_layer_weights *layer,
+        uint32_t il,
+        uint32_t slot_count,
+        const uint16_t *active_global,
+        uint32_t active_count,
+        double *host_s_inout,
+        double *upload_s_inout) {
+    if (!flashmoe_decode_prefetch_enabled()) return true;
+    const ds4_flashmoe_prefetch_model *model = flashmoe_prefetch_model_get();
+    if (!model) return true;
+    const ds4_flashmoe_prefetch_rule *rule =
+            flashmoe_prefetch_rule_lookup(model, il, active_global, active_count);
+    if (!rule || rule->predicted_count == 0) return true;
+
+    uint32_t budget = flashmoe_decode_prefetch_budget();
+    if (budget == 0) return true;
+    uint16_t prefetch_experts[16];
+    uint32_t prefetch_slots[16];
+    uint32_t prefetch_count = 0;
+    uint32_t chosen_slots[16];
+    uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
+    uint64_t gate_rb = 0, up_rb = 0, down_rb = 0;
+    char ferr[256];
+
+    for (uint32_t i = 0; i < rule->predicted_count && prefetch_count < budget; i++) {
+        const uint16_t expert = rule->predicted[i];
+        bool skip = false;
+        for (uint32_t a = 0; a < active_count; a++) {
+            if (active_global[a] == expert) { skip = true; break; }
+        }
+        if (skip) continue;
+        int32_t slot_index = g->flashmoe_decode_expert_slot[il][expert];
+        if (slot_index >= 0) {
+            const uint32_t slot = (uint32_t)slot_index;
+            if (slot < slot_count &&
+                g->flashmoe_decode_slot_valid[il][slot] &&
+                g->flashmoe_decode_slot_expert[il][slot] == (int)expert) {
+                continue;
+            }
+            g->flashmoe_decode_expert_slot[il][expert] = -1;
+        }
+        uint32_t slot = slot_count;
+        for (uint32_t probe = 0; probe < slot_count; probe++) {
+            bool already_chosen = false;
+            for (uint32_t c = 0; c < prefetch_count; c++) {
+                if (chosen_slots[c] == probe) { already_chosen = true; break; }
+            }
+            if (!already_chosen && !g->flashmoe_decode_slot_valid[il][probe]) {
+                slot = probe;
+                break;
+            }
+        }
+        if (slot == slot_count) break;
+        prefetch_experts[prefetch_count] = expert;
+        prefetch_slots[prefetch_count] = slot;
+        chosen_slots[prefetch_count] = slot;
+        prefetch_count++;
+    }
+    if (prefetch_count == 0) return true;
+
+    flashmoe_expected_blob_layout(layer,
+                                  &gate_bytes,
+                                  &up_bytes,
+                                  &down_bytes,
+                                  &gate_rb,
+                                  &up_rb,
+                                  &down_rb);
+    const uint64_t blob_stride = gate_bytes + up_bytes + down_bytes;
+    const double t_host0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
+    for (uint32_t i = 1; i < prefetch_count; i++) {
+        const uint16_t expert = prefetch_experts[i];
+        const uint32_t slot = prefetch_slots[i];
+        uint32_t j = i;
+        while (j > 0 && prefetch_slots[j - 1] > slot) {
+            prefetch_experts[j] = prefetch_experts[j - 1];
+            prefetch_slots[j] = prefetch_slots[j - 1];
+            j--;
+        }
+        prefetch_experts[j] = expert;
+        prefetch_slots[j] = slot;
+    }
+    if (ds4_flashmoe_runtime_load_selected_blobs((uint16_t)il,
+                                                 prefetch_experts,
+                                                 prefetch_count,
+                                                 false,
+                                                 g->flashmoe_blob_host,
+                                                 blob_stride,
+                                                 ferr,
+                                                 sizeof(ferr)) != 0) {
+        return true;
+    }
+    const double t_upload0 = flashmoe_timing_enabled() ? now_sec() : 0.0;
+    if (flashmoe_timing_enabled() && host_s_inout) *host_s_inout += t_upload0 - t_host0;
+    uint32_t run_start = 0;
+    while (run_start < prefetch_count) {
+        uint32_t run_end = run_start + 1u;
+        while (run_end < prefetch_count &&
+               prefetch_slots[run_end] == prefetch_slots[run_end - 1] + 1u) {
+            run_end++;
+        }
+        const uint32_t run_len = run_end - run_start;
+        if (!flashmoe_write_slot_tensor_run(g->flashmoe_decode_blob_slots[il],
+                                            prefetch_slots[run_start],
+                                            blob_stride,
+                                            run_len,
+                                            g->flashmoe_blob_host + (uint64_t)run_start * blob_stride)) {
+            return false;
+        }
+        run_start = run_end;
+    }
+    if (flashmoe_timing_enabled() && upload_s_inout) *upload_s_inout += now_sec() - t_upload0;
+    for (uint32_t i = 0; i < prefetch_count; i++) {
+        const uint32_t slot = prefetch_slots[i];
+        const uint16_t expert = prefetch_experts[i];
+        g->flashmoe_decode_slot_valid[il][slot] = 1u;
+        g->flashmoe_decode_slot_expert[il][slot] = expert;
+        g->flashmoe_decode_expert_slot[il][expert] = (int16_t)slot;
+        g->flashmoe_decode_slot_last_touch[il][slot] = g->flashmoe_decode_step;
+        g->flashmoe_decode_slot_access_count[il][slot] = 0u;
+        g->flashmoe_decode_slot_insert_step[il][slot] = g->flashmoe_decode_step;
+        g->flashmoe_decode_slot_prefetched[il][slot] = 1u;
+    }
+    if (flashmoe_timing_enabled()) {
+        g->flashmoe_decode_used = true;
+        g->flashmoe_decode_prefetches += prefetch_count;
+    }
+    return true;
+}
+
 static bool flashmoe_decode_prepare_slot_cache(
         ds4_gpu_graph           *g,
         const ds4_layer_weights *layer,
@@ -9942,6 +10238,13 @@ static bool flashmoe_decode_prepare_slot_cache(
             const uint32_t slot = (uint32_t)slot_index;
             g->flashmoe_decode_slot_last_touch[il][slot] = step;
             g->flashmoe_decode_slot_access_count[il][slot] += 1u;
+            if (g->flashmoe_decode_slot_prefetched[il][slot]) {
+                g->flashmoe_decode_slot_prefetched[il][slot] = 0u;
+                if (flashmoe_timing_enabled()) {
+                    g->flashmoe_decode_used = true;
+                    g->flashmoe_decode_prefetch_hits += 1u;
+                }
+            }
             if (flashmoe_timing_enabled()) {
                 g->flashmoe_decode_used = true;
                 g->flashmoe_decode_hits += 1u;
@@ -10043,6 +10346,17 @@ static bool flashmoe_decode_prepare_slot_cache(
             g->flashmoe_decode_slot_insert_step[il][slot] = g->flashmoe_decode_step;
             g->flashmoe_decode_slot_prefetched[il][slot] = 0u;
         }
+    }
+
+    if (!flashmoe_decode_prefetch_slots(g,
+                                        layer,
+                                        il,
+                                        slot_count,
+                                        active_global,
+                                        active_count,
+                                        &host_s,
+                                        &upload_s)) {
+        return false;
     }
 
     if (blob_slots) *blob_slots = g->flashmoe_decode_blob_slots[il];
@@ -17621,6 +17935,8 @@ static int generate_metal_graph_raw_swa(
     g.flashmoe_decode_layers = 0;
     g.flashmoe_decode_hits = 0;
     g.flashmoe_decode_misses = 0;
+    g.flashmoe_decode_prefetches = 0;
+    g.flashmoe_decode_prefetch_hits = 0;
     g.flashmoe_decode_step = 0;
     g.flashmoe_decode_router_s = 0.0;
     g.flashmoe_decode_host_s = 0.0;
@@ -17669,10 +17985,12 @@ static int generate_metal_graph_raw_swa(
     const double decode_s = t_decode1 - t_decode0;
     if (flashmoe_timing_enabled() && g.flashmoe_decode_used) {
         fprintf(stderr,
-                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " router_readback=%.3fms host_pack=%.3fms h2d_write=%.3fms routed_kernel=%.3fms dense_shared_other=%.3fms\n",
+                "ds4: flashmoe decode summary layers=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " prefetches=%" PRIu64 " prefetch_hits=%" PRIu64 " router_readback=%.3fms host_pack=%.3fms h2d_write=%.3fms routed_kernel=%.3fms dense_shared_other=%.3fms\n",
                 g.flashmoe_decode_layers,
                 g.flashmoe_decode_hits,
                 g.flashmoe_decode_misses,
+                g.flashmoe_decode_prefetches,
+                g.flashmoe_decode_prefetch_hits,
                 g.flashmoe_decode_router_s * 1000.0,
                 g.flashmoe_decode_host_s * 1000.0,
                 g.flashmoe_decode_upload_s * 1000.0,
