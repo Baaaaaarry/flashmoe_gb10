@@ -4930,123 +4930,6 @@ static bool flashmoe_write_slot_tensor_run(ds4_gpu_tensor *base,
     return ds4_gpu_tensor_write(base, start_slot * slot_bytes, src, run_bytes) != 0;
 }
 
-static uint32_t flashmoe_decode_layer_resident_count(const ds4_gpu_graph *g, uint32_t il, uint32_t slot_count) {
-    uint32_t resident = 0;
-    for (uint32_t i = 0; i < slot_count; i++) {
-        if (g->flashmoe_decode_slot_valid[il][i]) resident++;
-    }
-    return resident;
-}
-
-static double flashmoe_decode_candidate_score(
-        const ds4_gpu_graph *g,
-        uint32_t il,
-        uint32_t slot,
-        uint32_t slot_count,
-        uint64_t step,
-        ds4_flashmoe_evict_policy policy) {
-    const uint64_t last_touch = g->flashmoe_decode_slot_last_touch[il][slot];
-    const uint64_t insert_step = g->flashmoe_decode_slot_insert_step[il][slot];
-    const uint32_t access_count = g->flashmoe_decode_slot_access_count[il][slot];
-    if (policy == DS4_FLASHMOE_EVICT_LRU) {
-        return (double)(step >= last_touch ? step - last_touch : 0u);
-    }
-    if (policy == DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY) {
-        uint32_t max_access = 1;
-        for (uint32_t i = 0; i < slot_count; i++) {
-            if (g->flashmoe_decode_slot_valid[il][i] &&
-                g->flashmoe_decode_slot_access_count[il][i] > max_access) {
-                max_access = g->flashmoe_decode_slot_access_count[il][i];
-            }
-        }
-        const double recency = (double)(step >= last_touch ? step - last_touch : 0u);
-        const double frequency = (double)access_count / (double)max_access;
-        const double layer_pressure = (double)flashmoe_decode_layer_resident_count(g, il, slot_count) /
-                                      (double)(slot_count ? slot_count : 1u);
-        return 0.70 * recency - 0.30 * frequency + 0.10 * layer_pressure;
-    }
-    if (policy == DS4_FLASHMOE_EVICT_PREDICTOR) {
-        ds4_flashmoe_predictor_model *m = flashmoe_predictor_model_get();
-        if (!m) {
-            return flashmoe_decode_candidate_score(
-                    g, il, slot, slot_count, step,
-                    DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY);
-        }
-        uint32_t max_access = 1;
-        for (uint32_t i = 0; i < slot_count; i++) {
-            if (g->flashmoe_decode_slot_valid[il][i] &&
-                g->flashmoe_decode_slot_access_count[il][i] > max_access) {
-                max_access = g->flashmoe_decode_slot_access_count[il][i];
-            }
-        }
-        float feat[16] = {0};
-        for (size_t i = 0; i < m->feature_count; i++) {
-            switch (m->feature_ids[i]) {
-                case DS4_FLASHMOE_FEAT_RECENCY:
-                    feat[i] = (float)(step >= last_touch ? step - last_touch : 0u);
-                    break;
-                case DS4_FLASHMOE_FEAT_FREQUENCY:
-                    feat[i] = (float)access_count / (float)max_access;
-                    break;
-                case DS4_FLASHMOE_FEAT_SIZE_RATIO:
-                    feat[i] = 1.0f;
-                    break;
-                case DS4_FLASHMOE_FEAT_LAYER_PRESSURE:
-                    feat[i] = (float)flashmoe_decode_layer_resident_count(g, il, slot_count) /
-                              (float)(slot_count ? slot_count : 1u);
-                    break;
-                case DS4_FLASHMOE_FEAT_IS_PREFETCHED:
-                    feat[i] = g->flashmoe_decode_slot_prefetched[il][slot] ? 1.0f : 0.0f;
-                    break;
-                case DS4_FLASHMOE_FEAT_SLOT_AGE:
-                    feat[i] = (float)(step >= insert_step ? step - insert_step : 0u);
-                    break;
-            }
-        }
-        return flashmoe_predictor_score(m, feat);
-    }
-    return 0.0;
-}
-
-static uint32_t flashmoe_decode_select_victim_slot(
-        const ds4_gpu_graph *g,
-        uint32_t il,
-        uint32_t slot_count,
-        const uint32_t *used_slots,
-        uint32_t used_count,
-        uint64_t step) {
-    const ds4_flashmoe_evict_policy policy = flashmoe_decode_evict_policy();
-    if (policy == DS4_FLASHMOE_EVICT_ROUND_ROBIN) {
-        for (uint32_t attempt = 0; attempt < slot_count; attempt++) {
-            const uint32_t probe = (g->flashmoe_decode_next_slot[il] + attempt) % slot_count;
-            bool already_used = false;
-            for (uint32_t u = 0; u < used_count; u++) {
-                if (used_slots[u] == probe) { already_used = true; break; }
-            }
-            if (!already_used) return probe;
-        }
-        return g->flashmoe_decode_next_slot[il] % slot_count;
-    }
-    double best_score = -DBL_MAX;
-    uint32_t best_slot = slot_count;
-    for (uint32_t probe = 0; probe < slot_count; probe++) {
-        bool already_used = false;
-        for (uint32_t u = 0; u < used_count; u++) {
-            if (used_slots[u] == probe) { already_used = true; break; }
-        }
-        if (already_used || !g->flashmoe_decode_slot_valid[il][probe]) continue;
-        const double score = flashmoe_decode_candidate_score(g, il, probe, slot_count, step, policy);
-        if (best_slot == slot_count || score > best_score) {
-            best_score = score;
-            best_slot = probe;
-        }
-    }
-    if (best_slot == slot_count) {
-        return g->flashmoe_decode_next_slot[il] % slot_count;
-    }
-    return best_slot;
-}
-
 #endif
 
 static void layer_routed_moe_one_prealloc_flashmoe_selected(
@@ -9811,6 +9694,123 @@ struct ds4_gpu_graph {
 };
 
 #ifndef DS4_NO_GPU
+static uint32_t flashmoe_decode_layer_resident_count(const ds4_gpu_graph *g, uint32_t il, uint32_t slot_count) {
+    uint32_t resident = 0;
+    for (uint32_t i = 0; i < slot_count; i++) {
+        if (g->flashmoe_decode_slot_valid[il][i]) resident++;
+    }
+    return resident;
+}
+
+static double flashmoe_decode_candidate_score(
+        const ds4_gpu_graph *g,
+        uint32_t il,
+        uint32_t slot,
+        uint32_t slot_count,
+        uint64_t step,
+        ds4_flashmoe_evict_policy policy) {
+    const uint64_t last_touch = g->flashmoe_decode_slot_last_touch[il][slot];
+    const uint64_t insert_step = g->flashmoe_decode_slot_insert_step[il][slot];
+    const uint32_t access_count = g->flashmoe_decode_slot_access_count[il][slot];
+    if (policy == DS4_FLASHMOE_EVICT_LRU) {
+        return (double)(step >= last_touch ? step - last_touch : 0u);
+    }
+    if (policy == DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY) {
+        uint32_t max_access = 1;
+        for (uint32_t i = 0; i < slot_count; i++) {
+            if (g->flashmoe_decode_slot_valid[il][i] &&
+                g->flashmoe_decode_slot_access_count[il][i] > max_access) {
+                max_access = g->flashmoe_decode_slot_access_count[il][i];
+            }
+        }
+        const double recency = (double)(step >= last_touch ? step - last_touch : 0u);
+        const double frequency = (double)access_count / (double)max_access;
+        const double layer_pressure = (double)flashmoe_decode_layer_resident_count(g, il, slot_count) /
+                                      (double)(slot_count ? slot_count : 1u);
+        return 0.70 * recency - 0.30 * frequency + 0.10 * layer_pressure;
+    }
+    if (policy == DS4_FLASHMOE_EVICT_PREDICTOR) {
+        ds4_flashmoe_predictor_model *m = flashmoe_predictor_model_get();
+        if (!m) {
+            return flashmoe_decode_candidate_score(
+                    g, il, slot, slot_count, step,
+                    DS4_FLASHMOE_EVICT_RECENCY_FREQUENCY);
+        }
+        uint32_t max_access = 1;
+        for (uint32_t i = 0; i < slot_count; i++) {
+            if (g->flashmoe_decode_slot_valid[il][i] &&
+                g->flashmoe_decode_slot_access_count[il][i] > max_access) {
+                max_access = g->flashmoe_decode_slot_access_count[il][i];
+            }
+        }
+        float feat[16] = {0};
+        for (size_t i = 0; i < m->feature_count; i++) {
+            switch (m->feature_ids[i]) {
+                case DS4_FLASHMOE_FEAT_RECENCY:
+                    feat[i] = (float)(step >= last_touch ? step - last_touch : 0u);
+                    break;
+                case DS4_FLASHMOE_FEAT_FREQUENCY:
+                    feat[i] = (float)access_count / (float)max_access;
+                    break;
+                case DS4_FLASHMOE_FEAT_SIZE_RATIO:
+                    feat[i] = 1.0f;
+                    break;
+                case DS4_FLASHMOE_FEAT_LAYER_PRESSURE:
+                    feat[i] = (float)flashmoe_decode_layer_resident_count(g, il, slot_count) /
+                              (float)(slot_count ? slot_count : 1u);
+                    break;
+                case DS4_FLASHMOE_FEAT_IS_PREFETCHED:
+                    feat[i] = g->flashmoe_decode_slot_prefetched[il][slot] ? 1.0f : 0.0f;
+                    break;
+                case DS4_FLASHMOE_FEAT_SLOT_AGE:
+                    feat[i] = (float)(step >= insert_step ? step - insert_step : 0u);
+                    break;
+            }
+        }
+        return flashmoe_predictor_score(m, feat);
+    }
+    return 0.0;
+}
+
+static uint32_t flashmoe_decode_select_victim_slot(
+        const ds4_gpu_graph *g,
+        uint32_t il,
+        uint32_t slot_count,
+        const uint32_t *used_slots,
+        uint32_t used_count,
+        uint64_t step) {
+    const ds4_flashmoe_evict_policy policy = flashmoe_decode_evict_policy();
+    if (policy == DS4_FLASHMOE_EVICT_ROUND_ROBIN) {
+        for (uint32_t attempt = 0; attempt < slot_count; attempt++) {
+            const uint32_t probe = (g->flashmoe_decode_next_slot[il] + attempt) % slot_count;
+            bool already_used = false;
+            for (uint32_t u = 0; u < used_count; u++) {
+                if (used_slots[u] == probe) { already_used = true; break; }
+            }
+            if (!already_used) return probe;
+        }
+        return g->flashmoe_decode_next_slot[il] % slot_count;
+    }
+    double best_score = -DBL_MAX;
+    uint32_t best_slot = slot_count;
+    for (uint32_t probe = 0; probe < slot_count; probe++) {
+        bool already_used = false;
+        for (uint32_t u = 0; u < used_count; u++) {
+            if (used_slots[u] == probe) { already_used = true; break; }
+        }
+        if (already_used || !g->flashmoe_decode_slot_valid[il][probe]) continue;
+        const double score = flashmoe_decode_candidate_score(g, il, probe, slot_count, step, policy);
+        if (best_slot == slot_count || score > best_score) {
+            best_score = score;
+            best_slot = probe;
+        }
+    }
+    if (best_slot == slot_count) {
+        return g->flashmoe_decode_next_slot[il] % slot_count;
+    }
+    return best_slot;
+}
+
 static bool flashmoe_decode_prepare_slot_cache(
         ds4_gpu_graph           *g,
         const ds4_layer_weights *layer,
