@@ -69,7 +69,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--hidden-dim", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--features", default="recency,frequency,size_ratio,layer_pressure,is_prefetched")
+    parser.add_argument("--features", default="recency,frequency,layer_pressure,slot_age,recency_ratio,reuse_density,log_recency,log_frequency,is_prefetched")
     args = parser.parse_args()
     feature_names = [piece.strip() for piece in args.features.split(",") if piece.strip()]
     train(args.input, args.output, args.epochs, args.hidden_dim, args.lr, feature_names)

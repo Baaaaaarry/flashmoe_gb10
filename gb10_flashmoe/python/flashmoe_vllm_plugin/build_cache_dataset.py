@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -18,7 +19,7 @@ class Access:
 class Meta:
     last_touch: int
     access_count: int
-    layer_pressure: int
+    insert_step: int
 
 
 def load_trace(path: Path) -> list[Access]:
@@ -53,6 +54,11 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int, per_la
         "size_ratio",
         "layer_pressure",
         "is_prefetched",
+        "slot_age",
+        "recency_ratio",
+        "reuse_density",
+        "log_recency",
+        "log_frequency",
         "label",
     ]
     rows: list[dict[str, float]] = []
@@ -88,6 +94,8 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int, per_la
                 reuse_distance = float(future_distance[cand_key])
                 size_ratio = 1.0
                 layer_pressure = float(layer_counts.get(cand_key[0], 0)) / float(max(limit, 1))
+                slot_age = float(access.step - meta.insert_step)
+                slot_age_denom = slot_age + 1.0
                 rows.append({
                     "recency": recency,
                     "frequency": frequency,
@@ -95,6 +103,11 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int, per_la
                     "size_ratio": size_ratio,
                     "layer_pressure": layer_pressure,
                     "is_prefetched": 0.0,
+                    "slot_age": slot_age,
+                    "recency_ratio": recency / slot_age_denom,
+                    "reuse_density": float(meta.access_count) / slot_age_denom,
+                    "log_recency": math.log1p(recency),
+                    "log_frequency": math.log1p(float(meta.access_count)),
                     "label": 1.0 if cand_key == victim else 0.0,
                 })
 
@@ -105,7 +118,7 @@ def build_dataset(trace_path: Path, output_csv: Path, cache_entries: int, per_la
             else:
                 resident.pop(victim, None)
 
-        resident[key] = Meta(last_touch=access.step, access_count=1, layer_pressure=layer_counts.get(access.layer, 0) + 1)
+        resident[key] = Meta(last_touch=access.step, access_count=1, insert_step=access.step)
         layer_resident[key] = resident[key]
         layer_counts[access.layer] = layer_counts.get(access.layer, 0) + 1
 

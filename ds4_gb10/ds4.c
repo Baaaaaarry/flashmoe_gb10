@@ -4524,6 +4524,10 @@ typedef enum {
     DS4_FLASHMOE_FEAT_LAYER_PRESSURE = 3,
     DS4_FLASHMOE_FEAT_IS_PREFETCHED = 4,
     DS4_FLASHMOE_FEAT_SLOT_AGE = 5,
+    DS4_FLASHMOE_FEAT_RECENCY_RATIO = 6,
+    DS4_FLASHMOE_FEAT_REUSE_DENSITY = 7,
+    DS4_FLASHMOE_FEAT_LOG_RECENCY = 8,
+    DS4_FLASHMOE_FEAT_LOG_FREQUENCY = 9,
 } ds4_flashmoe_feature_id;
 
 typedef struct {
@@ -4762,6 +4766,10 @@ static bool flashmoe_predictor_feature_id(const char *name, ds4_flashmoe_feature
     else if (strcmp(name, "layer_pressure") == 0) *out = DS4_FLASHMOE_FEAT_LAYER_PRESSURE;
     else if (strcmp(name, "is_prefetched") == 0) *out = DS4_FLASHMOE_FEAT_IS_PREFETCHED;
     else if (strcmp(name, "slot_age") == 0) *out = DS4_FLASHMOE_FEAT_SLOT_AGE;
+    else if (strcmp(name, "recency_ratio") == 0) *out = DS4_FLASHMOE_FEAT_RECENCY_RATIO;
+    else if (strcmp(name, "reuse_density") == 0) *out = DS4_FLASHMOE_FEAT_REUSE_DENSITY;
+    else if (strcmp(name, "log_recency") == 0) *out = DS4_FLASHMOE_FEAT_LOG_RECENCY;
+    else if (strcmp(name, "log_frequency") == 0) *out = DS4_FLASHMOE_FEAT_LOG_FREQUENCY;
     else return false;
     return true;
 }
@@ -9744,13 +9752,17 @@ static double flashmoe_decode_candidate_score(
             }
         }
         float feat[16] = {0};
+        const float slot_age = (float)(step >= insert_step ? step - insert_step : 0u);
+        const float slot_age_denom = slot_age + 1.0f;
+        const float recency_f = (float)(step >= last_touch ? step - last_touch : 0u);
+        const float frequency_f = (float)access_count / (float)max_access;
         for (size_t i = 0; i < m->feature_count; i++) {
             switch (m->feature_ids[i]) {
                 case DS4_FLASHMOE_FEAT_RECENCY:
-                    feat[i] = (float)(step >= last_touch ? step - last_touch : 0u);
+                    feat[i] = recency_f;
                     break;
                 case DS4_FLASHMOE_FEAT_FREQUENCY:
-                    feat[i] = (float)access_count / (float)max_access;
+                    feat[i] = frequency_f;
                     break;
                 case DS4_FLASHMOE_FEAT_SIZE_RATIO:
                     feat[i] = 1.0f;
@@ -9763,7 +9775,19 @@ static double flashmoe_decode_candidate_score(
                     feat[i] = g->flashmoe_decode_slot_prefetched[il][slot] ? 1.0f : 0.0f;
                     break;
                 case DS4_FLASHMOE_FEAT_SLOT_AGE:
-                    feat[i] = (float)(step >= insert_step ? step - insert_step : 0u);
+                    feat[i] = slot_age;
+                    break;
+                case DS4_FLASHMOE_FEAT_RECENCY_RATIO:
+                    feat[i] = recency_f / slot_age_denom;
+                    break;
+                case DS4_FLASHMOE_FEAT_REUSE_DENSITY:
+                    feat[i] = (float)access_count / slot_age_denom;
+                    break;
+                case DS4_FLASHMOE_FEAT_LOG_RECENCY:
+                    feat[i] = log1pf(recency_f);
+                    break;
+                case DS4_FLASHMOE_FEAT_LOG_FREQUENCY:
+                    feat[i] = log1pf((float)access_count);
                     break;
             }
         }
