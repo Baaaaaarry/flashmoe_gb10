@@ -32,7 +32,7 @@ CPU_CORE_OBJS = ds4_cpu.o flashmoe_backend.o
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test cpu cuda cuda-spark cuda-generic cuda-regression
+.PHONY: all help clean test cpu cuda cuda-spark cuda-generic cuda-regression cuda-readback-smoke
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench
@@ -68,6 +68,7 @@ help:
 	@echo "  make cuda-spark          Build CUDA for DGX Spark / GB10"
 	@echo "  make cuda-generic        Build CUDA for a generic local CUDA GPU"
 	@echo "  make cuda CUDA_ARCH=sm_N Build CUDA with an explicit nvcc -arch value"
+	@echo "  make cuda-readback-smoke Build CUDA GPU->CPU handoff microbenchmark"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, and ./ds4-bench"
 	@echo "  make test                Build and run tests"
 	@echo "  make clean               Remove build outputs"
@@ -102,6 +103,8 @@ cpu: ds4_cli_cpu.o ds4_server_cpu.o ds4_bench_cpu.o linenoise.o rax.o $(CPU_CORE
 
 cuda-regression: tests/cuda_long_context_smoke
 	./tests/cuda_long_context_smoke
+
+cuda-readback-smoke: tests/cuda_router_readback_smoke
 endif
 
 ds4.o: ds4.c ds4.h ds4_gpu.h
@@ -121,6 +124,9 @@ ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h rax.h
 
 tests/cuda_long_context_smoke.o: tests/cuda_long_context_smoke.c ds4_gpu.h
 	$(CC) $(CFLAGS) -I. -c -o $@ tests/cuda_long_context_smoke.c
+
+tests/cuda_router_readback_smoke.o: tests/cuda_router_readback_smoke.cu
+	$(NVCC) $(NVCCFLAGS) -c -o $@ tests/cuda_router_readback_smoke.cu
 
 rax.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CFLAGS) -c -o $@ rax.c
@@ -152,6 +158,9 @@ flashmoe_backend.o: flashmoe_backend.c flashmoe_backend.h
 tests/cuda_long_context_smoke: tests/cuda_long_context_smoke.o ds4_cuda.o
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
 
+tests/cuda_router_readback_smoke: tests/cuda_router_readback_smoke.o
+	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDLIBS)
+
 ds4_test: ds4_test.o rax.o $(CORE_OBJS)
 ifeq ($(UNAME_S),Darwin)
 	$(CC) $(CFLAGS) -o $@ ds4_test.o rax.o $(CORE_OBJS) $(METAL_LDLIBS)
@@ -163,4 +172,4 @@ test: ds4_test
 	./ds4_test
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4_cpu ds4_native ds4_server_test ds4_test *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4_cpu ds4_native ds4_server_test ds4_test *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o tests/cuda_router_readback_smoke tests/cuda_router_readback_smoke.o

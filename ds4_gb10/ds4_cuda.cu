@@ -7596,6 +7596,58 @@ extern "C" int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_te
     }
     return ok;
 }
+
+__global__ static void flashmoe_lookup_slots_kernel(
+        int32_t       *slot_ids,
+        int32_t       *all_hit,
+        const int32_t *selected,
+        const int32_t *expert_slot,
+        uint32_t       n_pairs,
+        uint32_t       n_expert) {
+    __shared__ int hit_ok;
+    if (threadIdx.x == 0) hit_ok = 1;
+    __syncthreads();
+    const uint32_t i = (uint32_t)threadIdx.x;
+    if (i < n_pairs) {
+        const int32_t expert = selected[i];
+        int32_t slot = -1;
+        if (expert >= 0 && (uint32_t)expert < n_expert) {
+            slot = expert_slot[expert];
+        }
+        slot_ids[i] = slot;
+        if (slot < 0) atomicExch(&hit_ok, 0);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        all_hit[0] = hit_ok;
+    }
+}
+
+extern "C" int ds4_gpu_flashmoe_lookup_slots_tensor(
+        ds4_gpu_tensor       *slot_ids,
+        ds4_gpu_tensor       *all_hit,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *expert_slot,
+        uint32_t              n_pairs,
+        uint32_t              n_expert) {
+    if (!slot_ids || !all_hit || !selected || !expert_slot || n_pairs == 0) return 0;
+    if (slot_ids->bytes < (uint64_t)n_pairs * sizeof(int32_t) ||
+        all_hit->bytes < sizeof(int32_t) ||
+        selected->bytes < (uint64_t)n_pairs * sizeof(int32_t) ||
+        expert_slot->bytes < (uint64_t)n_expert * sizeof(int32_t)) {
+        return 0;
+    }
+    const uint32_t block = n_pairs < 32u ? 32u : n_pairs;
+    flashmoe_lookup_slots_kernel<<<1, block>>>(
+            (int32_t *)slot_ids->ptr,
+            (int32_t *)all_hit->ptr,
+            (const int32_t *)selected->ptr,
+            (const int32_t *)expert_slot->ptr,
+            n_pairs,
+            n_expert);
+    return cuda_ok(cudaGetLastError(), "flashmoe lookup slots launch");
+}
+
 extern "C" int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits, const ds4_gpu_tensor *tokens, uint32_t n_tokens) {
     if (!selected || !weights || !probs || !logits || !tokens || !model_map || n_tokens == 0 ||
         n_expert_groups > 1u || n_group_used > 0u ||

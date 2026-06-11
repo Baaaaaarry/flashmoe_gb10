@@ -613,6 +613,14 @@ int ds4_gpu_router_select_tensor(
         bool                    hash_mode,
         const ds4_gpu_tensor *logits);
 
+int ds4_gpu_flashmoe_lookup_slots_tensor(
+        ds4_gpu_tensor       *slot_ids,
+        ds4_gpu_tensor       *all_hit,
+        const ds4_gpu_tensor *selected,
+        const ds4_gpu_tensor *expert_slot,
+        uint32_t              n_pairs,
+        uint32_t              n_expert);
+
 int ds4_gpu_router_select_batch_tensor(
         ds4_gpu_tensor       *selected,
         ds4_gpu_tensor       *weights,
