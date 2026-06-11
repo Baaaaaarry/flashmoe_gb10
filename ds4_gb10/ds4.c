@@ -10688,17 +10688,6 @@ static bool metal_graph_decode_routed_flashmoe(
     }
 
     if (gpu_all_hit_fast) {
-        const double t_slots0 = timing ? now_sec() : 0.0;
-        if (ds4_gpu_tensor_read(g->flashmoe_decode_selected_gpu[il],
-                                0,
-                                selected_slots_host,
-                                (uint64_t)DS4_N_EXPERT_USED * sizeof(int32_t)) == 0) {
-            goto cleanup;
-        }
-        if (timing) {
-            readback_copy_s += now_sec() - t_slots0;
-            readback_s = readback_wait_s + readback_copy_s;
-        }
         blob_slots = g->flashmoe_decode_blob_slots[il];
         selected_gpu = g->flashmoe_decode_selected_gpu[il];
         slot_count = flashmoe_decode_slot_count();
@@ -10712,20 +10701,6 @@ static bool metal_graph_decode_routed_flashmoe(
                                       NULL,
                                       &down_row_bytes);
         blob_stride = gate_expert_bytes + up_expert_bytes + down_expert_bytes;
-        for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
-            const int32_t slot = selected_slots_host[i];
-            if (slot >= 0 && (uint32_t)slot < slot_count) {
-                g->flashmoe_decode_slot_last_touch[il][slot] = ++g->flashmoe_decode_step;
-                g->flashmoe_decode_slot_access_count[il][slot] += 1u;
-                if (g->flashmoe_decode_slot_prefetched[il][slot]) {
-                    g->flashmoe_decode_slot_prefetched[il][slot] = 0u;
-                    if (flashmoe_timing_enabled()) {
-                        g->flashmoe_decode_used = true;
-                        g->flashmoe_decode_prefetch_hits += 1u;
-                    }
-                }
-            }
-        }
         if (flashmoe_timing_enabled()) {
             g->flashmoe_decode_used = true;
             g->flashmoe_decode_hits += DS4_N_EXPERT_USED;
