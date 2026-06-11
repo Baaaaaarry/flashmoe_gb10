@@ -615,6 +615,73 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 - 如果目标是压 `router_readback`，重点不是更高 SSD/PCIe 带宽，而是**降低 GPU router 结果回 CPU 的同步/一致性等待**
 - 如果目标是压 `host_pack`，重点就是**降低 miss expert 的读取延迟与带宽成本**
 
+### 7.4.2 为什么微基准 handoff 很小，而线上 `readback_wait` 很大
+
+为了进一步确认 `router_readback` 是否真的来自“小数据 GPU->CPU 回读太慢”，我们又新增了一个独立微基准：
+
+- `tests/cuda_router_readback_smoke.cu`
+
+它测两条最小控制路径：
+
+1. `device_sync_copy`
+   - GPU 写一个很小的 device buffer
+   - CPU `cudaDeviceSynchronize()`
+   - 然后做一次很小的 D2H copy
+2. `mapped_sync_cpu_read`
+   - GPU 写一个很小的 mapped host buffer
+   - CPU `cudaDeviceSynchronize()`
+   - 然后直接在 CPU 读 host value
+
+GB10 上的实测结果如下：
+
+| test mode | avg wait (ms) | avg read/copy (ms) | 结论 |
+|---|---:|---:|---|
+| `device_sync_copy` | `0.003395` | `0.004635` | 最小化条件下，GPU 写小结果后 CPU 等待其可见的 handoff latency 很小 |
+| `mapped_sync_cpu_read` | `0.003451` | `0.000108` | 即使直接读 mapped host buffer，最小 handoff latency 仍然只是微秒级 |
+
+而线上 decode breakdown 则是：
+
+- `readback_wait ≈ 1.211 ms/layer`
+- `readback_copy ≈ 0.009 ms/layer`
+
+两者相差约 `350x`。这说明：
+
+1. **当前大的不是回读几个 expert id 本身**
+   - 微基准已经证明，纯粹的“GPU 写一个小结果，CPU 等它可见”只有 `~0.003 ms`
+   - 因而线上 `1.2 ms/layer` 不可能主要来自 copy 字节数或单纯 handoff
+
+2. **当前大的主要是每层 decode 的 GPU->CPU 控制切换同步点**
+   - 线上 `readback_wait` 不是在等 `selected[6]` 的 copy
+   - 而是在等：
+     - 当前层相关 GPU 命令流收敛
+     - router 结果对 CPU 可见
+     - CPU 可以安全接管 hit/miss 决策
+   - 本质上是一次 **per-layer control handoff latency**
+
+3. **`GPU_HIT_LOOKUP` 只带来小幅改善，进一步印证问题不在 copy**
+   - 基线：
+     - `readback_wait = 1.219 ms/layer`
+     - `generation = 7.61 t/s`
+   - 开启 `GPU_HIT_LOOKUP` 后：
+     - `readback_wait = 1.184 ms/layer`
+     - `generation = 7.86 t/s`
+   - 说明即使把一部分 hit lookup 提前到 GPU，收益也只有 `~3%` 量级
+   - 这进一步表明：当前最大的不是 `selected` copy，而是**CPU/GPU handoff 这个同步点本身**
+
+因此当前阶段最准确的归因是：
+
+- **微基准测到的是最小 handoff latency**
+- **线上 `readback_wait` 测到的是完整 decode 每层的 GPU->CPU control handoff latency**
+
+如果下一代硬件要从根上降低 `router_readback`，应优先优化：
+
+1. **CPU/GPU 间小控制数据的低延迟共享与一致性**
+   - 例如共享 SLC / coherent scratch
+2. **更轻量的 GPU->CPU completion / doorbell 机制**
+   - 避免每层都走重同步
+3. **更进一步的 GPU-side hit/miss fast path**
+   - 让 all-hit 层尽量不回 CPU
+
 ### 7.5 Learned eviction policy：有效，但收益有限
 
 在 `flashmoe_gpu_slot_cache_experiment` 分支上，我们把 decode slot cache 的替换策略从简单的 `round_robin` 升级到了：
