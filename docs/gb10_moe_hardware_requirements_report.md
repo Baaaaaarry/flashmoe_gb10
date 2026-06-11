@@ -558,6 +558,199 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
    - 只有在现有 direct `blob-slot` 路线稳定后，这类“提前加载 expert”的策略才值得接入
    - 它的主要价值是进一步压 miss path，而不是替代当前 decode 主路径
 
+### 7.4.1 Decode 细化瓶颈拆解：`router_readback` 与 `host_pack`
+
+为了判断下一代硬件到底应该优先优化：
+
+- GPU router 结果回 CPU 的同步路径
+- 还是 miss expert 的读取路径
+
+我们在 `flashmoe_gpu_slot_cache_experiment` 上把 decode 统计进一步拆成：
+
+- `router_kernel`
+- `readback_wait`
+- `readback_copy`
+- `slot_lookup`
+- `blob_read`
+- `selected_write`
+- `slot_fill`
+
+这组数据来自一次实际运行的逐层 trace：
+
+- `layers = 5461`
+- `slot_count = 32`
+- `prefetch = 0`
+
+对应 summary：
+
+- `router_readback = 6709.299 ms`
+- `host_pack = 5676.300 ms`
+- `h2d_write = 1560.958 ms`
+
+进一步拆解后的平均/峰值如下：
+
+| Stage | avg ms / layer | max ms / layer | 含义 | 结论 |
+|---|---:|---:|---|---|
+| `router_kernel` | `0.009` | `0.026 @ L15` | GPU 上 router 本身的计算 | 几乎可以忽略，不是瓶颈 |
+| `readback_wait` | `1.211` | `2.193 @ L24` | GPU router 结果对 CPU 可见前的同步/等待 | `router_readback` 的主要部分，说明核心问题不是拷贝字节数，而是 CPU/GPU handoff |
+| `readback_copy` | `0.009` | `0.154 @ L34` | 真正把 `selected[6]` 从 GPU 读到 CPU | 平均值极小，不是带宽瓶颈 |
+| `slot_lookup` | `0.001` | `0.004 @ L8` | CPU 侧 hit/miss 查表、victim 选择、miss 排序 | 几乎可以忽略，不值得优先优化 |
+| `blob_read` | `1.038` | `4.341 @ L12` | miss expert 从 `layer-pack` 读取到 host blob | `host_pack` 的主要部分，说明 decode miss 仍主要受 expert read 影响 |
+| `selected_write` | `0.007` | `0.040 @ L0` | slot id 写回 `selected_gpu` | 可以忽略 |
+| `slot_fill` | `0.279` | `1.201 @ L0` | miss blob 写入 GPU resident slot | 有成本，但明显小于 `readback_wait` 和 `blob_read` |
+
+这张表可以直接解释两个核心问题：
+
+1. **为什么 `router_readback` 在不同 slot 下几乎不变**
+   - 因为它的主体不是 copy，而是 `readback_wait`
+   - 当前实现中，每层都会先把 router 结果交给 CPU，再由 CPU 判断 hit/miss
+   - 所以命中率提升只能压 `host_pack` / `h2d_write`，不能显著压 `router_readback`
+
+2. **为什么 `host_pack` 仍然很重**
+   - 因为它的主体不是 CPU control logic，而是 `blob_read`
+   - 即 miss expert 的真实读取成本
+
+因此，对下一代硬件的直接启发是：
+
+- 如果目标是压 `router_readback`，重点不是更高 SSD/PCIe 带宽，而是**降低 GPU router 结果回 CPU 的同步/一致性等待**
+- 如果目标是压 `host_pack`，重点就是**降低 miss expert 的读取延迟与带宽成本**
+
+### 7.5 Learned eviction policy：有效，但收益有限
+
+在 `flashmoe_gpu_slot_cache_experiment` 分支上，我们把 decode slot cache 的替换策略从简单的 `round_robin` 升级到了：
+
+- `recency_frequency`
+- `predictor`（训练得到的小 FFN eviction policy）
+
+评估口径保持一致：
+
+- `slot_count = 64`
+- `decode blob-slot` 打开
+- 相同 prompt / ctx / n
+- 对比 `flashmoe decode summary`
+
+实测结果如下：
+
+| policy | hits | misses | router_readback (ms) | host_pack (ms) | h2d_write (ms) | generation (t/s) |
+|---|---:|---:|---:|---:|---:|---:|
+| `round_robin` | 21402 | 11364 | 7448 | 5797 | 1731 | 7.22 |
+| `recency_frequency` | 22526 | 10240 | 7116 | 5178 | 1423 | 8.15 |
+| `predictor` | 22704 | 10062 | 7112 | 5135 | 1407 | 8.18 |
+
+这组数据支持三个事实：
+
+1. **训练版 predictor 已经跑通，并且略优于规则策略**
+   - 相比 `recency_frequency`，`predictor` 进一步减少了 `178` 次 miss
+   - `host_pack` 再降约 `42 ms`
+   - `h2d_write` 再降约 `16 ms`
+   - `decode TPS` 从 `8.15` 提到 `8.18`
+
+2. **主要收益仍然来自“更少的 miss”**
+   - `router_readback` 基本不变
+   - 说明 learned eviction 解决的是 miss path，不是结构性的 CPU/GPU 往返
+
+3. **收益已经进入边际区间**
+   - `predictor` 虽然赢了，但只略赢
+   - 当前 decode 的最大瓶颈仍然是：
+     - `router_readback`
+     - `host_pack`
+
+因此，learned eviction policy 可以视为：
+
+- **有效**
+- **可继续保留**
+- **但不是数量级改进**
+
+### 7.6 Predictor-driven prefetch：训练是准的，但当前实现不可用
+
+在 learned eviction 略优于规则策略之后，我们继续验证了两种基于训练结果的 prefetch：
+
+1. **同步 slot-fill prefetch**
+   - 在 decode 主路径里直接读 blob 并填 GPU slot
+2. **host-side async prefetch queue**
+   - 只做后台 host/page-cache 预热，不提前写 GPU slot
+
+#### 7.6.1 同步 slot-fill prefetch
+
+对比：
+
+- baseline：`predictor only`
+- 实验：`predictor + prefetch`
+
+实测：
+
+| mode | hits | misses | prefetches | prefetch_hits | host_pack (ms) | h2d_write (ms) | generation (t/s) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| predictor only | 22704 | 10062 | 0 | 0 | 5137 | 1409 | 8.15 |
+| predictor + sync prefetch | 23492 | 9274 | 785 | 783 | 5223 | 1401 | 8.11 |
+
+这组数据说明：
+
+- `prefetch_hits` 很高，说明**预测本身是准的**
+- `misses` 也确实下降了
+- 但 `generation` 从 `8.15` 掉到 `8.11`
+
+根本原因是：
+
+- 这版 prefetch 仍然在 **decode 主路径** 里执行
+- 它做的工作包括：
+  - `host blob read`
+  - `slot fill`
+- 也就是说，它只是把未来要做的工作提前支付，而不是把工作隐藏掉
+
+所以它的本质是：
+
+- **预测正确**
+- **执行时机错误**
+
+#### 7.6.2 Host-side async prefetch queue
+
+为避免同步 slot fill 占用 critical path，我们又尝试了异步 host-side prefetch queue：
+
+- decode 主路径只投递预取请求
+- 后台线程从 `layer-pack` 预读 blob，试图预热 page cache
+- 不提前写 GPU slot
+
+实测：
+
+| mode | hits | misses | prefetches | prefetch_hits | router_readback (ms) | host_pack (ms) | h2d_write (ms) | generation (t/s) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| predictor only | 22704 | 10062 | 0 | 0 | 7110 | 5171 | 1405 | 8.13 |
+| predictor + async host prefetch | 22704 | 10062 | 7027 | 6859 | 7145 | 5287 | 1425 | 7.96 |
+
+这组数据说明得更直接：
+
+- `prefetch_hits` 依然很高，说明**预测还是准的**
+- 但 `hits/misses` **完全没有变化**
+  - 因为这版不写 GPU slot，只做 host/page-cache 预热
+- 同时 `host_pack`、`h2d_write`、`router_readback` 全都变差
+- `generation` 从 `8.13` 掉到 `7.96`
+
+根本原因不是“模型不准”，而是：
+
+- 额外的后台预读和前台真实 miss 路径竞争了：
+  - SSD / page cache
+  - CPU
+  - 内存带宽
+- 在当前 GB10 路径上，**额外 host-side 预读的资源竞争成本，大于它给 page cache 带来的收益**
+
+#### 7.6.3 结论
+
+因此，当前关于训练版 predictor 的最严谨结论是：
+
+1. **learned eviction policy 是有效的**
+   - 它能略优于 `recency_frequency`
+
+2. **predictor-driven prefetch 当前不可用**
+   - 不是因为 predictor 不准
+   - 而是因为：
+     - 同步 prefetch 会占用 decode 主路径
+     - 异步 host prefetch 会与真实 miss 路径竞争资源
+
+3. **当前不应把训练预取合入主线**
+   - 训练版 predictor 目前只适合作为 eviction policy
+   - 不适合作为在线 prefetch 执行器
+
 ---
 
 ## 8. 最终结论
