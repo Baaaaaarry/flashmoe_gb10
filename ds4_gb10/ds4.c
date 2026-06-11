@@ -10671,6 +10671,14 @@ static bool metal_graph_decode_routed_flashmoe(
         slot_count = flashmoe_decode_slot_count();
         active_count = DS4_N_EXPERT_USED;
         miss_count = 0;
+        flashmoe_expected_blob_layout(layer,
+                                      &gate_expert_bytes,
+                                      &up_expert_bytes,
+                                      &down_expert_bytes,
+                                      &gate_row_bytes,
+                                      NULL,
+                                      &down_row_bytes);
+        blob_stride = gate_expert_bytes + up_expert_bytes + down_expert_bytes;
         for (uint32_t i = 0; i < DS4_N_EXPERT_USED; i++) {
             const int32_t slot = selected_slots_host[i];
             if (slot >= 0 && (uint32_t)slot < slot_count) {
