@@ -18,6 +18,7 @@ extern "C" {
  * buffers stay device-owned across the whole prefill/decode command sequence.
  */
 typedef struct ds4_gpu_tensor ds4_gpu_tensor;
+typedef struct ds4_gpu_event ds4_gpu_event;
 
 typedef struct {
     uint64_t model_cache_bytes;
@@ -48,6 +49,10 @@ int ds4_gpu_begin_commands(void);
 int ds4_gpu_flush_commands(void);
 int ds4_gpu_end_commands(void);
 int ds4_gpu_synchronize(void);
+ds4_gpu_event *ds4_gpu_event_create(void);
+void ds4_gpu_event_destroy(ds4_gpu_event *ev);
+int ds4_gpu_event_record(ds4_gpu_event *ev);
+int ds4_gpu_event_synchronize(ds4_gpu_event *ev);
 
 int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size);
 int ds4_gpu_set_model_map_lazy(const void *model_map, uint64_t model_size);

@@ -43,6 +43,10 @@ struct ds4_gpu_tensor {
     int owner;
 };
 
+struct ds4_gpu_event {
+    cudaEvent_t ev;
+};
+
 typedef struct {
     uint8_t scales[CUDA_QK_K / 16];
     uint8_t qs[CUDA_QK_K / 4];
@@ -1380,6 +1384,33 @@ extern "C" int ds4_gpu_begin_commands(void) { return 1; }
 extern "C" int ds4_gpu_flush_commands(void) { return cuda_ok(cudaDeviceSynchronize(), "flush"); }
 extern "C" int ds4_gpu_end_commands(void) { return cuda_ok(cudaDeviceSynchronize(), "end commands"); }
 extern "C" int ds4_gpu_synchronize(void) { return cuda_ok(cudaDeviceSynchronize(), "synchronize"); }
+extern "C" ds4_gpu_event *ds4_gpu_event_create(void) {
+    ds4_gpu_event *out = (ds4_gpu_event *)calloc(1, sizeof(ds4_gpu_event));
+    if (!out) return NULL;
+    cudaError_t err = cudaEventCreateWithFlags(&out->ev, cudaEventDisableTiming);
+    if (err != cudaSuccess) {
+        free(out);
+        (void)cudaGetLastError();
+        return NULL;
+    }
+    return out;
+}
+
+extern "C" void ds4_gpu_event_destroy(ds4_gpu_event *ev) {
+    if (!ev) return;
+    if (ev->ev) (void)cudaEventDestroy(ev->ev);
+    free(ev);
+}
+
+extern "C" int ds4_gpu_event_record(ds4_gpu_event *ev) {
+    if (!ev || !ev->ev) return 0;
+    return cuda_ok(cudaEventRecord(ev->ev, 0), "event record");
+}
+
+extern "C" int ds4_gpu_event_synchronize(ds4_gpu_event *ev) {
+    if (!ev || !ev->ev) return 0;
+    return cuda_ok(cudaEventSynchronize(ev->ev), "event synchronize");
+}
 
 extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size) {
     if (!model_map || model_size == 0) return 0;
