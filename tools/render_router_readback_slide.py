@@ -61,6 +61,7 @@ txt(
     58,
     260,
     "• Microbench: GPU writes a tiny result, CPU synchronizes, then reads it.\n"
+    "• Router-like microbench: 4096->256 logits + top-k6, then synchronize and read selected[6].\n"
     "• Online decode: real per-layer routed-MoE path with router -> CPU hit/miss control handoff.\n"
     "• New breakdown split router_readback into:\n"
     "  router_kernel, readback_wait, readback_copy.\n"
@@ -72,11 +73,10 @@ txt(
 
 rect(670, 206, 330, 148, (249, 250, 252), (236, 240, 245), 2, 18)
 txt(835, 230, "Key Numeric Contrast", 16, GRAY, "ma")
-txt(835, 270, "0.0034 ms", 31, BLUE, "ma")
-txt(835, 304, "microbench avg_wait", 14, GRAY, "ma")
-txt(835, 334, "vs", 16, DARK, "ma")
-txt(835, 360, "1.21 ms/layer", 31, RED, "ma")
-txt(835, 394, "online readback_wait", 14, GRAY, "ma")
+txt(835, 260, "0.0034 -> 0.452 -> 1.21 ms", 24, BLUE, "ma")
+txt(835, 294, "minimum handoff -> router-like -> online", 14, GRAY, "ma")
+txt(835, 328, "copy remains tiny (~0.0046 ms)", 16, DARK, "ma")
+txt(835, 362, "the gap is in the GPU->CPU control handoff", 14, RED, "ma")
 
 rect(1030, 122, 592, 284, LIGHT_BLUE, LIGHT_BLUE, 1, 0)
 txt(1050, 138, "Why the microbench is not enough", 20, NAVY)
@@ -102,10 +102,11 @@ txt(34, 432, "Measured Comparison", 20, NAVY)
 table_x, table_y = 34, 470
 col_w = [260, 165, 165, 480]
 row_h = 54
-headers = ["Path / Metric", "avg wait (ms)", "avg copy/read (ms)", "Interpretation"]
+headers = ["Path / Metric", "avg kernel/wait (ms)", "avg copy/read (ms)", "Interpretation"]
 rows = [
-    ["Microbench: device_sync_copy", "0.003395", "0.004635", "Minimum GPU write -> CPU visible handoff is only microseconds."],
-    ["Microbench: mapped_sync_cpu_read", "0.003451", "0.000108", "Mapped host read is also microseconds; pure handoff is tiny."],
+    ["Microbench: device_sync_copy", "wait 0.003342", "copy 0.004521", "Minimum GPU write -> CPU visible handoff is only microseconds."],
+    ["Microbench: mapped_sync_cpu_read", "wait 0.003428", "read 0.000094", "Mapped host read is also microseconds; pure handoff is tiny."],
+    ["Microbench: router_like_sync_copy", "kernel 0.003387 / wait 0.452150", "copy 0.004588", "Router-like GPU work already creates a mid-scale wait, but still far below online."],
     ["Online decode: readback_wait", "1.211", "-", "Dominant part of router_readback; this is the real per-layer control handoff cost."],
     ["Online decode: readback_copy", "-", "0.009", "Copying selected[6] itself is tiny; bandwidth is not the issue."],
     ["GPU_HIT_LOOKUP delta", "1.219 -> 1.184", "-", "All-hit fast path only reduces wait by ~3%, so the structural sync point remains."],
@@ -130,9 +131,12 @@ rect(1090, 454, 510, 270, (250, 252, 255), BORDER, 2, 12)
 txt(1112, 470, "What is the real root cause?", 20, NAVY)
 txt(
     1112,
-    514,
+    504,
     "• The online wait is not paying for 6 expert IDs.\n"
-    "• It is paying for the per-layer GPU->CPU control handoff:\n"
+    "• Router-like GPU work alone already explains ~0.45 ms of wait.\n"
+    "• The remaining ~0.75 ms is where the real mystery sits:\n"
+    "  more complete per-layer GPU state must settle before CPU takes over.\n"
+    "• So the online wait is paying for the per-layer GPU->CPU control handoff:\n"
     "  GPU-side router-related command stream must settle,\n"
     "  results must become CPU-visible,\n"
     "  then CPU can safely decide hit/miss and start miss handling.\n"
@@ -161,7 +165,7 @@ rect(34, 886, 1568, 46, (233, 247, 236), (200, 230, 206), 2, 10)
 txt(
     50,
     898,
-    "※ Key Takeaway: the microbenchmark proves the minimum handoff is tiny; the real online cost comes from per-layer GPU->CPU control handoff, not from copying a few expert IDs.",
+    "※ Key Takeaway: minimum handoff is tiny (~0.003 ms), router-like handoff is moderate (~0.45 ms), and the remaining gap to online (~1.21 ms/layer) comes from full per-layer GPU->CPU control handoff, not copying a few expert IDs.",
     15,
     GREEN,
 )

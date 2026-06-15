@@ -621,7 +621,7 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
 
 - `tests/cuda_router_readback_smoke.cu`
 
-它测两条最小控制路径：
+它现在测三条控制路径：
 
 1. `device_sync_copy`
    - GPU 写一个很小的 device buffer
@@ -631,34 +631,72 @@ FlashMoE 不是白送收益，它把一部分 DRAM/统一内存压力转移成�
    - GPU 写一个很小的 mapped host buffer
    - CPU `cudaDeviceSynchronize()`
    - 然后直接在 CPU 读 host value
+3. `router_like_sync_copy`
+   - 在 GPU 上显式复现 decode router 的核心计算量：
+     - 一个 `4096 -> 256` 的 logits 计算
+     - 再做 `top-k=6`
+   - 然后 `cudaDeviceSynchronize()`
+   - 再把 `selected[6]` 回读到 CPU
+
+这个微基准的实现方式是：
+
+- 单独文件：
+  - `tests/cuda_router_readback_smoke.cu`
+- 其中 `router_like_sync_copy` 新增了两个最小 kernel：
+  - `router_logits_kernel`
+    - 计算 `4096 x 256` 的 router-like logits
+  - `router_topk6_kernel`
+    - 对 `256` 个 logits 取 `top-k=6`
+- 然后在 host 侧测三段时间：
+  - `avg_kernel_ms`
+  - `avg_wait_ms`
+  - `avg_copy_ms`
+
+它的目的不是复现完整 decode，而是回答一个更窄的问题：
+
+- **如果只保留 router 这条小 GPU 路径，再同步、再回读同样大小的 `selected[6]`，等待时间会不会已经接近线上 `readback_wait`？**
 
 GB10 上的实测结果如下：
 
-| test mode | avg wait (ms) | avg read/copy (ms) | 结论 |
-|---|---:|---:|---|
-| `device_sync_copy` | `0.003395` | `0.004635` | 最小化条件下，GPU 写小结果后 CPU 等待其可见的 handoff latency 很小 |
-| `mapped_sync_cpu_read` | `0.003451` | `0.000108` | 即使直接读 mapped host buffer，最小 handoff latency 仍然只是微秒级 |
+| test mode | avg kernel (ms) | avg wait (ms) | avg read/copy (ms) | 结论 |
+|---|---:|---:|---:|---|
+| `device_sync_copy` | `-` | `0.003342` | `0.004521` | 最小化条件下，GPU 写小结果后 CPU 等待其可见的 handoff latency 很小 |
+| `mapped_sync_cpu_read` | `-` | `0.003428` | `0.000094` | 即使直接读 mapped host buffer，最小 handoff latency 仍然只是微秒级 |
+| `router_like_sync_copy` | `0.003387` | `0.452150` | `0.004588` | 只复现 router 这条小 GPU 路径后，等待已经明显变大，但仍远小于线上 |
 
 而线上 decode breakdown 则是：
 
 - `readback_wait ≈ 1.211 ms/layer`
 - `readback_copy ≈ 0.009 ms/layer`
 
-两者相差约 `350x`。这说明：
+这就形成了三层非常清晰的延迟量级：
+
+1. **最小 handoff**
+   - `~0.0034 ms`
+2. **router-like handoff**
+   - `~0.452 ms`
+3. **真实 decode per-layer handoff**
+   - `~1.211 ms`
+
+这说明：
 
 1. **当前大的不是回读几个 expert id 本身**
    - 微基准已经证明，纯粹的“GPU 写一个小结果，CPU 等它可见”只有 `~0.003 ms`
    - 因而线上 `1.2 ms/layer` 不可能主要来自 copy 字节数或单纯 handoff
 
-2. **当前大的主要是每层 decode 的 GPU->CPU 控制切换同步点**
-   - 线上 `readback_wait` 不是在等 `selected[6]` 的 copy
-   - 而是在等：
-     - 当前层相关 GPU 命令流收敛
-     - router 结果对 CPU 可见
-     - CPU 可以安全接管 hit/miss 决策
-   - 本质上是一次 **per-layer control handoff latency**
+2. **router 这条小 GPU 路径本身，已经会引入中等规模的同步等待**
+   - `router_like_sync_copy` 的 `avg_wait_ms ≈ 0.452`
+   - 说明只要不是“写一个 int”，而是做了真实 router-like GPU 工作，CPU 等待就会明显上升
 
-3. **`GPU_HIT_LOOKUP` 只带来小幅改善，进一步印证问题不在 copy**
+3. **线上还有额外约 `0.7~0.8 ms/layer`**
+   - `1.211 - 0.452 ≈ 0.759 ms`
+   - 这部分就不是 router 本身，也不是 selected copy
+   - 更像是：
+     - 本层更完整的前序 GPU 执行状态收敛
+     - attention / hc / norm / router 前后尾账
+     - 更完整的 GPU->CPU control handoff
+
+4. **`GPU_HIT_LOOKUP` 只带来小幅改善，进一步印证问题不在 copy**
    - 基线：
      - `readback_wait = 1.219 ms/layer`
      - `generation = 7.61 t/s`
@@ -671,6 +709,7 @@ GB10 上的实测结果如下：
 因此当前阶段最准确的归因是：
 
 - **微基准测到的是最小 handoff latency**
+- **router-like 微基准测到的是“router 本身 + 同步”的最小代价**
 - **线上 `readback_wait` 测到的是完整 decode 每层的 GPU->CPU control handoff latency**
 
 如果下一代硬件要从根上降低 `router_readback`，应优先优化：
