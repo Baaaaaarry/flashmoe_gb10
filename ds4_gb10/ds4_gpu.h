@@ -620,10 +620,13 @@ int ds4_gpu_router_select_tensor(
 
 int ds4_gpu_flashmoe_lookup_slots_tensor(
         ds4_gpu_tensor       *slot_ids,
-        ds4_gpu_tensor       *all_hit,
+        ds4_gpu_tensor       *miss_count,
         const ds4_gpu_tensor *selected,
         const ds4_gpu_tensor *expert_slot,
+        const ds4_gpu_tensor *slot_valid,
+        const ds4_gpu_tensor *slot_expert,
         uint32_t              n_pairs,
+        uint32_t              slot_count,
         uint32_t              n_expert);
 
 int ds4_gpu_router_select_batch_tensor(

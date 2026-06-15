@@ -7630,51 +7630,67 @@ extern "C" int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_te
 
 __global__ static void flashmoe_lookup_slots_kernel(
         int32_t       *slot_ids,
-        int32_t       *all_hit,
+        int32_t       *miss_count,
         const int32_t *selected,
         const int32_t *expert_slot,
+        const uint8_t *slot_valid,
+        const int32_t *slot_expert,
         uint32_t       n_pairs,
+        uint32_t       slot_count,
         uint32_t       n_expert) {
-    __shared__ int hit_ok;
-    if (threadIdx.x == 0) hit_ok = 1;
+    __shared__ int miss_ctr;
+    if (threadIdx.x == 0) miss_ctr = 0;
     __syncthreads();
     const uint32_t i = (uint32_t)threadIdx.x;
     if (i < n_pairs) {
         const int32_t expert = selected[i];
         int32_t slot = -1;
         if (expert >= 0 && (uint32_t)expert < n_expert) {
-            slot = expert_slot[expert];
+            const int32_t mapped = expert_slot[expert];
+            if (mapped >= 0 && (uint32_t)mapped < slot_count &&
+                slot_valid[mapped] &&
+                slot_expert[mapped] == expert) {
+                slot = mapped;
+            }
         }
         slot_ids[i] = slot;
-        if (slot < 0) atomicExch(&hit_ok, 0);
+        if (slot < 0) atomicAdd(&miss_ctr, 1);
     }
     __syncthreads();
     if (threadIdx.x == 0) {
-        all_hit[0] = hit_ok;
+        miss_count[0] = miss_ctr;
     }
 }
 
 extern "C" int ds4_gpu_flashmoe_lookup_slots_tensor(
         ds4_gpu_tensor       *slot_ids,
-        ds4_gpu_tensor       *all_hit,
+        ds4_gpu_tensor       *miss_count,
         const ds4_gpu_tensor *selected,
         const ds4_gpu_tensor *expert_slot,
+        const ds4_gpu_tensor *slot_valid,
+        const ds4_gpu_tensor *slot_expert,
         uint32_t              n_pairs,
+        uint32_t              slot_count,
         uint32_t              n_expert) {
-    if (!slot_ids || !all_hit || !selected || !expert_slot || n_pairs == 0) return 0;
+    if (!slot_ids || !miss_count || !selected || !expert_slot || !slot_valid || !slot_expert || n_pairs == 0) return 0;
     if (slot_ids->bytes < (uint64_t)n_pairs * sizeof(int32_t) ||
-        all_hit->bytes < sizeof(int32_t) ||
+        miss_count->bytes < sizeof(int32_t) ||
         selected->bytes < (uint64_t)n_pairs * sizeof(int32_t) ||
-        expert_slot->bytes < (uint64_t)n_expert * sizeof(int32_t)) {
+        expert_slot->bytes < (uint64_t)n_expert * sizeof(int32_t) ||
+        slot_valid->bytes < (uint64_t)slot_count * sizeof(uint8_t) ||
+        slot_expert->bytes < (uint64_t)slot_count * sizeof(int32_t)) {
         return 0;
     }
     const uint32_t block = n_pairs < 32u ? 32u : n_pairs;
     flashmoe_lookup_slots_kernel<<<1, block>>>(
             (int32_t *)slot_ids->ptr,
-            (int32_t *)all_hit->ptr,
+            (int32_t *)miss_count->ptr,
             (const int32_t *)selected->ptr,
             (const int32_t *)expert_slot->ptr,
+            (const uint8_t *)slot_valid->ptr,
+            (const int32_t *)slot_expert->ptr,
             n_pairs,
+            slot_count,
             n_expert);
     return cuda_ok(cudaGetLastError(), "flashmoe lookup slots launch");
 }
