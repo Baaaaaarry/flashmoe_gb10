@@ -721,6 +721,148 @@ GB10 上的实测结果如下：
 3. **更进一步的 GPU-side hit/miss fast path**
    - 让 all-hit 层尽量不回 CPU
 
+### 7.4.3 Prefill 细化瓶颈拆解：`blob_read` 与 `tensor_upload`
+
+为了用和 decode 相同的方法回答另一个问题：
+
+- 当前 FlashMoE prefill 的 TPS 主要被哪一段限制？
+- 是 `router_selected` 回读、CPU 布局整理、expert blob 读取、H2D 上传，还是 routed kernel 本身？
+
+我们在 `flashmoe_gpu_slot_cache_experiment` 上进一步把 prefill 路径拆成：
+
+- `selected_readback`
+- `layout_pack`
+- `blob_read`
+- `selected_write`
+- `tensor_upload`
+- `kernel`
+
+测量方法与 decode 相同：
+
+- 开启 `DS4_FLASHMOE_TIMING=1`
+- 导出逐层 trace：
+  - `DS4_FLASHMOE_PREFILL_LAYER_TRACE=/tmp/flashmoe_prefill_layers.csv`
+- 在 `metal_graph_prefill_routed_flashmoe(...)` 中分别计时：
+  1. `batch_router_selected` 从 GPU 读回 CPU
+  2. `selected -> active expert layout` 的 CPU 组织
+  3. `ds4_flashmoe_runtime_load_selected_pack(...)` 的 expert blob 读取
+  4. `gate/up/down` 三块 tensor 上传
+  5. `selected_local -> selected_gpu`
+  6. batch routed MoE kernel
+
+一次真实 prefill 运行得到的 summary 是：
+
+- `layers = 43`
+- `read = 1057.405 ms`
+- `upload = 378.972 ms`
+- `kernel = 2.832 ms`
+- `bytes = 20675.25 MiB`
+- `prefill = 13.04 t/s`（另一口径日志中总 prefill 为 `10.57 t/s`，与当前 E2E 统计方式一致）
+
+对应 breakdown 如下：
+
+| Stage | avg ms / layer | max ms / layer | 含义 | 结论 |
+|---|---:|---:|---|---|
+| `selected_readback` | `0.747` | `1.002 @ L40` | `batch_router_selected` 从 GPU 回 CPU | 有固定成本，但明显小于 blob read 和 tensor upload |
+| `layout_pack` | `0.002` | `0.002 @ L36` | CPU 侧将 selected 转成 active expert layout | 几乎可以忽略，不是瓶颈 |
+| `blob_read` | `23.842` | `66.513 @ L2` | 从 `layer-pack` 读取本层活跃 expert blob | **prefill 的第一大瓶颈**，显著大于其它所有阶段 |
+| `selected_write` | `0.010` | `0.012 @ L40` | `selected_local` 写回 `selected_gpu` | 可以忽略 |
+| `tensor_upload` | `8.803` | `15.662 @ L2` | `gate/up/down` 三块 expert tensor 上传到 GPU | **第二大瓶颈** |
+| `kernel` | `0.066` | `0.154 @ L0` | batch routed MoE kernel 本身 | 极小，不是算力瓶颈 |
+
+这组数据说明了三个非常明确的事实。
+
+#### 1. Prefill 当前不是算子瓶颈，而是数据路径瓶颈
+
+最直观的对比是：
+
+- `blob_read ≈ 23.842 ms/layer`
+- `tensor_upload ≈ 8.803 ms/layer`
+- `kernel ≈ 0.066 ms/layer`
+
+也就是说，当前 prefill routed MoE 的 GPU 计算只占很小一部分时间；绝大多数时间都花在：
+
+1. miss / active expert 的 blob 读取
+2. `gate/up/down` 三块 tensor 上传
+
+因此 prefill 当前首先不是 FLOPs 问题，而是：
+
+- expert read latency / bandwidth
+- 以及 tensor upload 带宽
+
+#### 2. `selected_readback` 有固定成本，但不是 prefill 的决定性瓶颈
+
+prefill 里 `selected_readback ≈ 0.747 ms/layer`，量级上比 decode 的 `readback_wait` 小得多，也明显小于：
+
+- `blob_read`
+- `tensor_upload`
+
+这说明：
+
+- prefill 阶段 CPU/GPU handoff 的确存在
+- 但 prefill 当前的主问题并不是 router 结果回 CPU，而是后面要真正搬运和准备的大量 routed expert 数据
+
+#### 3. `layout_pack` 和 `selected_write` 都接近可以忽略
+
+这两个阶段的平均值只有：
+
+- `layout_pack = 0.002 ms/layer`
+- `selected_write = 0.010 ms/layer`
+
+所以：
+
+- CPU 侧 selected 重排
+- 把 selected_local 写回 GPU
+
+都不是值得优先花时间优化的点。
+
+#### 逐层数据还说明了什么
+
+逐层 trace 的前几层和后几层摘录如下：
+
+- `L0`: `blob_read=57.18 ms`, `tensor_upload=14.52 ms`
+- `L1`: `blob_read=49.37 ms`, `tensor_upload=14.17 ms`
+- `L2`: `blob_read=53.16 ms`, `tensor_upload=21.21 ms`
+- `L38`: `blob_read=16.85 ms`, `tensor_upload=6.98 ms`
+- `L39`: `blob_read=23.12 ms`, `tensor_upload=9.59 ms`
+- `L42`: `blob_read=22.03 ms`, `tensor_upload=7.58 ms`
+
+这说明：
+
+1. 前几层的活跃 expert 工作集更大，导致：
+   - `blob_read`
+   - `tensor_upload`
+   都显著偏高
+2. 后面层虽然下降，但 `blob_read` 仍然是绝对主项
+3. prefill 不是单纯“某一层异常”，而是整条 expert streaming 路径都偏重，只是前几层更明显
+
+因此，针对 prefill 的优化优先级应该非常清楚：
+
+1. **优先压 `blob_read`**
+   - 更高 expert read 带宽
+   - 更好的 layer-pack 连续布局
+   - 更强的 host/page-cache 热路径
+
+2. **第二优先级压 `tensor_upload`**
+   - 更少的 `gate/up/down` 拆分上传
+   - 更接近“blob streaming direct consume”的 GPU 路径
+
+3. **不要优先优化 `layout_pack` / `selected_write` / `kernel`**
+   - 这些阶段太小，不会显著改变 prefill TPS
+
+所以从硬件视角看，当前 prefill 的直接结论是：
+
+- **第一瓶颈是 miss / active expert 的 blob read latency**
+- **第二瓶颈是三段 tensor upload**
+- **GPU kernel 本身几乎不是问题**
+
+这也意味着，如果下一代硬件只优化 decode 的 `router_readback`，而不改善：
+
+- expert read 带宽 / 延迟
+- upload 路径
+
+那么 prefill TPS 不会有数量级改善。
+
 ### 7.5 Learned eviction policy：有效，但收益有限
 
 在 `flashmoe_gpu_slot_cache_experiment` 分支上，我们把 decode slot cache 的替换策略从简单的 `round_robin` 升级到了：
