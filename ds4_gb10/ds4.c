@@ -4504,54 +4504,6 @@ static bool flashmoe_upload_selected_pack(
     return true;
 }
 
-static bool flashmoe_upload_selected_blobs(
-        const int32_t       *selected_local,
-        uint32_t             n_pairs,
-        const uint8_t       *blob_bytes,
-        uint32_t             active_count,
-        uint64_t             blob_stride,
-        ds4_gpu_tensor      *blob_reuse,
-        ds4_gpu_tensor      *selected_reuse,
-        ds4_gpu_tensor     **blob_w,
-        ds4_gpu_tensor     **selected_gpu,
-        double             *tensor_upload_s_out,
-        double             *selected_write_s_out) {
-    *blob_w = NULL;
-    *selected_gpu = NULL;
-    if (!selected_local || !blob_bytes || !blob_reuse || !selected_reuse ||
-        active_count == 0 || n_pairs == 0 || blob_stride == 0) {
-        return false;
-    }
-
-    const uint64_t blob_bytes_total = (uint64_t)active_count * blob_stride;
-    *blob_w = ds4_gpu_tensor_view(blob_reuse, 0, blob_bytes_total);
-    *selected_gpu = selected_reuse;
-    if (!*blob_w) return false;
-
-    const bool timing = flashmoe_timing_enabled();
-    const double t_blob0 = timing ? now_sec() : 0.0;
-    if (ds4_gpu_tensor_write(*blob_w, 0, blob_bytes, blob_bytes_total) == 0) {
-        ds4_gpu_tensor_free(*blob_w);
-        *blob_w = NULL;
-        *selected_gpu = NULL;
-        return false;
-    }
-    if (timing && tensor_upload_s_out) *tensor_upload_s_out += now_sec() - t_blob0;
-
-    const double t_sel0 = timing ? now_sec() : 0.0;
-    if (ds4_gpu_tensor_write(*selected_gpu,
-                             0,
-                             selected_local,
-                             (uint64_t)n_pairs * sizeof(selected_local[0])) == 0) {
-        ds4_gpu_tensor_free(*blob_w);
-        *blob_w = NULL;
-        *selected_gpu = NULL;
-        return false;
-    }
-    if (timing && selected_write_s_out) *selected_write_s_out += now_sec() - t_sel0;
-    return true;
-}
-
 static bool flashmoe_decode_gpu_cache_enabled(void) {
     static int cache = -1;
     if (cache == -1) {
@@ -9908,7 +9860,6 @@ struct ds4_gpu_graph {
     ds4_gpu_tensor *batch_routed_down;
     ds4_gpu_tensor *batch_routed_out;
     bool batch_routed_mid_is_f16;
-    ds4_gpu_tensor *flashmoe_blob_w;
     ds4_gpu_tensor *flashmoe_gate_w;
     ds4_gpu_tensor *flashmoe_up_w;
     ds4_gpu_tensor *flashmoe_down_w;
@@ -9933,7 +9884,6 @@ struct ds4_gpu_graph {
     uint64_t flashmoe_gate_w_bytes;
     uint64_t flashmoe_up_w_bytes;
     uint64_t flashmoe_down_w_bytes;
-    uint64_t flashmoe_blob_w_bytes;
     int *flashmoe_selected_host;
     int32_t *flashmoe_selected_local_host;
     uint8_t *flashmoe_blob_host;
@@ -10991,101 +10941,78 @@ static bool metal_graph_prefill_routed_flashmoe(
         uint32_t                n_tokens) {
     const uint64_t selected_elems = (uint64_t)n_tokens * DS4_N_EXPERT_USED;
     int *selected = g->flashmoe_selected_host;
-    ds4_gpu_tensor *blob_w = NULL, *selected_gpu = NULL;
-    uint16_t active_global[DS4_N_EXPERT];
+    ds4_flashmoe_selected_pack pack;
+    ds4_gpu_tensor *gate_w = NULL, *up_w = NULL, *down_w = NULL, *selected_gpu = NULL;
     bool ok = false;
     const bool timing = flashmoe_timing_enabled();
-    uint32_t active_count = 0;
-    uint64_t gate_bytes = 0, up_bytes = 0, down_bytes = 0;
-    uint64_t gate_rb = 0, up_rb = 0, down_rb = 0;
-    uint64_t blob_stride = 0;
     double t_selected_readback = 0.0;
     double t_layout = 0.0;
     double t_blob_read = 0.0;
     double t_selected_write = 0.0;
     double t_tensor_upload = 0.0;
     double t_read = 0.0, t_upload = 0.0, t_kernel = 0.0;
-    char ferr[256];
+    memset(&pack, 0, sizeof(pack));
 
     if (!selected) goto cleanup;
     const double t_selected0 = timing ? now_sec() : 0.0;
     if (ds4_gpu_tensor_read(g->batch_router_selected, 0, selected, selected_elems * sizeof(int)) == 0) goto cleanup;
     if (timing) t_selected_readback = now_sec() - t_selected0;
-
-    flashmoe_expected_blob_layout(layer,
-                                  &gate_bytes,
-                                  &up_bytes,
-                                  &down_bytes,
-                                  &gate_rb,
-                                  &up_rb,
-                                  &down_rb);
-    blob_stride = gate_bytes + up_bytes + down_bytes;
-    const double t_layout0 = timing ? now_sec() : 0.0;
-    if (!flashmoe_build_selected_layout(selected,
+    if (!flashmoe_pack_selected_experts(layer,
+                                        il,
+                                        selected,
                                         (uint32_t)selected_elems,
                                         g->flashmoe_selected_local_host,
-                                        active_global,
-                                        &active_count)) goto cleanup;
-    if (timing) t_layout = now_sec() - t_layout0;
-
-    const double t_blob0 = timing ? now_sec() : 0.0;
-    if (ds4_flashmoe_runtime_load_selected_blobs((uint16_t)il,
-                                                 active_global,
-                                                 active_count,
-                                                 false,
-                                                 g->flashmoe_blob_host,
-                                                 blob_stride,
-                                                 ferr,
-                                                 sizeof(ferr)) != 0) {
-        fprintf(stderr,
-                "ds4: FlashMoE backend failed to batch-load prefill blobs layer=%u: %s\n",
-                il,
-                ferr[0] ? ferr : "unknown error");
-        goto cleanup;
-    }
-    if (timing) t_blob_read = now_sec() - t_blob0;
+                                        g->flashmoe_gate_host,
+                                        g->flashmoe_up_host,
+                                        g->flashmoe_down_host,
+                                        &pack,
+                                        &t_layout,
+                                        &t_blob_read)) goto cleanup;
     if (timing) t_read = t_selected_readback + t_layout + t_blob_read;
-    if (!flashmoe_upload_selected_blobs(g->flashmoe_selected_local_host,
-                                        (uint32_t)selected_elems,
-                                        g->flashmoe_blob_host,
-                                        active_count,
-                                        blob_stride,
-                                        g->flashmoe_blob_w,
-                                        g->flashmoe_selected_gpu,
-                                        &blob_w,
-                                        &selected_gpu,
-                                        &t_tensor_upload,
-                                        &t_selected_write)) goto cleanup;
+    if (!flashmoe_upload_selected_pack(&pack,
+                                       (uint32_t)selected_elems,
+                                       g->flashmoe_gate_w,
+                                       g->flashmoe_up_w,
+                                       g->flashmoe_down_w,
+                                       g->flashmoe_selected_gpu,
+                                       &gate_w,
+                                       &up_w,
+                                       &down_w,
+                                       &selected_gpu,
+                                       &t_tensor_upload,
+                                       &t_selected_write)) goto cleanup;
     if (timing) t_upload = t_tensor_upload + t_selected_write;
     g->batch_routed_mid_is_f16 = false;
     const double t_kernel0 = timing ? now_sec() : 0.0;
-    ok = ds4_gpu_routed_moe_batch_external_blob_tensor(g->batch_routed_out,
-                                                       g->batch_routed_gate,
-                                                       g->batch_routed_up,
-                                                       g->batch_routed_mid,
-                                                       g->batch_routed_down,
-                                                       blob_w,
-                                                       layer->ffn_gate_exps->type,
-                                                       layer->ffn_down_exps->type,
-                                                       blob_stride,
-                                                       gate_bytes,
-                                                       up_bytes,
-                                                       gate_rb,
-                                                       down_rb,
-                                                       active_count,
-                                                       (uint32_t)layer->ffn_gate_exps->dim[0],
-                                                       (uint32_t)layer->ffn_down_exps->dim[0],
-                                                       (uint32_t)layer->ffn_down_exps->dim[1],
-                                                       selected_gpu,
-                                                       g->batch_router_weights,
-                                                       DS4_N_EXPERT_USED,
-                                                       DS4_SWIGLU_CLAMP_EXP,
-                                                       g->batch_ffn_norm,
-                                                       n_tokens,
-                                                       &g->batch_routed_mid_is_f16) != 0;
+    ok = ds4_gpu_routed_moe_batch_external_tensor(g->batch_routed_out,
+                                                  g->batch_routed_gate,
+                                                  g->batch_routed_up,
+                                                  g->batch_routed_mid,
+                                                  g->batch_routed_down,
+                                                  gate_w,
+                                                  up_w,
+                                                  down_w,
+                                                  layer->ffn_gate_exps->type,
+                                                  layer->ffn_down_exps->type,
+                                                  pack.gate_expert_bytes,
+                                                  pack.gate_row_bytes,
+                                                  pack.down_expert_bytes,
+                                                  pack.down_row_bytes,
+                                                  pack.active_count,
+                                                  (uint32_t)layer->ffn_gate_exps->dim[0],
+                                                  (uint32_t)layer->ffn_down_exps->dim[0],
+                                                  (uint32_t)layer->ffn_down_exps->dim[1],
+                                                  selected_gpu,
+                                                  g->batch_router_weights,
+                                                  DS4_N_EXPERT_USED,
+                                                  DS4_SWIGLU_CLAMP_EXP,
+                                                  g->batch_ffn_norm,
+                                                  n_tokens,
+                                                  &g->batch_routed_mid_is_f16) != 0;
     if (timing) {
         t_kernel = now_sec() - t_kernel0;
-        const uint64_t bytes = (uint64_t)active_count * blob_stride;
+        const uint64_t bytes = (uint64_t)pack.active_count *
+                               (pack.gate_expert_bytes + pack.up_expert_bytes + pack.down_expert_bytes);
         g->flashmoe_prefill_used = true;
         g->flashmoe_prefill_layers += 1u;
         g->flashmoe_prefill_bytes += bytes;
@@ -11125,7 +11052,7 @@ static bool metal_graph_prefill_routed_flashmoe(
                                             il,
                                             n_tokens,
                                             (uint32_t)selected_elems,
-                                            active_count,
+                                            pack.active_count,
                                             t_selected_readback,
                                             t_layout,
                                             t_blob_read,
@@ -11135,7 +11062,11 @@ static bool metal_graph_prefill_routed_flashmoe(
     }
 
 cleanup:
-    if (blob_w != g->flashmoe_blob_w) ds4_gpu_tensor_free(blob_w);
+    if (selected_gpu != g->flashmoe_selected_gpu) ds4_gpu_tensor_free(selected_gpu);
+    if (down_w != g->flashmoe_down_w) ds4_gpu_tensor_free(down_w);
+    if (up_w != g->flashmoe_up_w) ds4_gpu_tensor_free(up_w);
+    if (gate_w != g->flashmoe_gate_w) ds4_gpu_tensor_free(gate_w);
+    flashmoe_selected_pack_free(&pack);
     return ok;
 }
 
@@ -11173,7 +11104,6 @@ static void metal_graph_free(ds4_gpu_graph *g) {
     ds4_gpu_tensor_free(g->batch_shared_mid);
     ds4_gpu_tensor_free(g->batch_shared_up);
     ds4_gpu_tensor_free(g->batch_shared_gate);
-    ds4_gpu_tensor_free(g->flashmoe_blob_w);
     ds4_gpu_tensor_free(g->flashmoe_down_w);
     ds4_gpu_tensor_free(g->flashmoe_up_w);
     ds4_gpu_tensor_free(g->flashmoe_gate_w);
@@ -11590,8 +11520,8 @@ static bool metal_graph_alloc_raw_cap(
         if ((uint64_t)DS4_N_EXPERT * down_exp_bytes > flashmoe_down_bytes_max) {
             flashmoe_down_bytes_max = (uint64_t)DS4_N_EXPERT * down_exp_bytes;
         }
-        if ((uint64_t)DS4_N_EXPERT * blob_exp_bytes > flashmoe_blob_bytes_max) {
-            flashmoe_blob_bytes_max = (uint64_t)DS4_N_EXPERT * blob_exp_bytes;
+        if ((uint64_t)DS4_N_EXPERT_USED * blob_exp_bytes > flashmoe_blob_bytes_max) {
+            flashmoe_blob_bytes_max = (uint64_t)DS4_N_EXPERT_USED * blob_exp_bytes;
         }
     }
 
@@ -11749,11 +11679,9 @@ static bool metal_graph_alloc_raw_cap(
     g->batch_router_probs = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT * sizeof(float));
     g->batch_router_selected = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(int));
     g->batch_router_weights = ds4_gpu_tensor_alloc(pc * DS4_N_EXPERT_USED * sizeof(float));
-    g->flashmoe_blob_w = ds4_gpu_tensor_alloc(flashmoe_blob_bytes_max);
     g->flashmoe_gate_w = ds4_gpu_tensor_alloc(flashmoe_gate_bytes_max);
     g->flashmoe_up_w = ds4_gpu_tensor_alloc(flashmoe_up_bytes_max);
     g->flashmoe_down_w = ds4_gpu_tensor_alloc(flashmoe_down_bytes_max);
-    g->flashmoe_blob_w_bytes = flashmoe_blob_bytes_max;
     g->flashmoe_gate_w_bytes = flashmoe_gate_bytes_max;
     g->flashmoe_up_w_bytes = flashmoe_up_bytes_max;
     g->flashmoe_down_w_bytes = flashmoe_down_bytes_max;
@@ -11840,7 +11768,6 @@ static bool metal_graph_alloc_raw_cap(
                     g->batch_shared_mid && g->batch_shared_out &&
                     g->batch_router_logits && g->batch_router_probs &&
                     g->batch_router_selected && g->batch_router_weights &&
-                    g->flashmoe_blob_w &&
                     g->flashmoe_gate_w && g->flashmoe_up_w && g->flashmoe_down_w &&
                     g->flashmoe_selected_host && g->flashmoe_selected_local_host &&
                     g->flashmoe_blob_host &&
