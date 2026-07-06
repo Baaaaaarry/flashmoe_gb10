@@ -750,25 +750,31 @@ GB10 上的实测结果如下：
   5. `selected_local -> selected_gpu`
   6. batch routed MoE kernel
 
-一次真实 prefill 运行得到的 summary 是：
+在多轮参数扫描后，当前稳定默认值已经固化为：
+
+- `DS4_FLASHMOE_IO_THREADS=4`
+- `DS4_FLASHMOE_IO_MERGE_GAP=4`
+- `DS4_FLASHMOE_IO_MAX_WINDOW_EXPERTS=64`
+
+对应一次真实 prefill 运行得到的 summary 是：
 
 - `layers = 43`
-- `read = 1057.405 ms`
-- `upload = 378.972 ms`
-- `kernel = 2.832 ms`
+- `read = 1034.090 ms`
+- `upload = 373.522 ms`
+- `kernel = 2.835 ms`
 - `bytes = 20675.25 MiB`
-- `prefill = 13.04 t/s`（另一口径日志中总 prefill 为 `10.57 t/s`，与当前 E2E 统计方式一致）
+- `prefill = 13.40 t/s`（另一口径日志中总 prefill 为 `11.05 t/s`，与当前 E2E 统计方式一致）
 
 对应 breakdown 如下：
 
 | Stage | avg ms / layer | max ms / layer | 含义 | 结论 |
 |---|---:|---:|---|---|
-| `selected_readback` | `0.747` | `1.002 @ L40` | `batch_router_selected` 从 GPU 回 CPU | 有固定成本，但明显小于 blob read 和 tensor upload |
+| `selected_readback` | `0.746` | `1.133 @ L23` | `batch_router_selected` 从 GPU 回 CPU | 有固定成本，但明显小于 blob read 和 tensor upload |
 | `layout_pack` | `0.002` | `0.002 @ L36` | CPU 侧将 selected 转成 active expert layout | 几乎可以忽略，不是瓶颈 |
-| `blob_read` | `23.842` | `66.513 @ L2` | 从 `layer-pack` 读取本层活跃 expert blob | **prefill 的第一大瓶颈**，显著大于其它所有阶段 |
-| `selected_write` | `0.010` | `0.012 @ L40` | `selected_local` 写回 `selected_gpu` | 可以忽略 |
-| `tensor_upload` | `8.803` | `15.662 @ L2` | `gate/up/down` 三块 expert tensor 上传到 GPU | **第二大瓶颈** |
-| `kernel` | `0.066` | `0.154 @ L0` | batch routed MoE kernel 本身 | 极小，不是算力瓶颈 |
+| `blob_read` | `23.300` | `53.175 @ L0` | 从 `layer-pack` 读取本层活跃 expert blob | **prefill 的第一大瓶颈**，显著大于其它所有阶段 |
+| `selected_write` | `0.009` | `0.010 @ L38` | `selected_local` 写回 `selected_gpu` | 可以忽略 |
+| `tensor_upload` | `8.677` | `16.698 @ L2` | `gate/up/down` 三块 expert tensor 上传到 GPU | **第二大瓶颈** |
+| `kernel` | `0.066` | `0.153 @ L0` | batch routed MoE kernel 本身 | 极小，不是算力瓶颈 |
 
 这组数据说明了三个非常明确的事实。
 
@@ -776,8 +782,8 @@ GB10 上的实测结果如下：
 
 最直观的对比是：
 
-- `blob_read ≈ 23.842 ms/layer`
-- `tensor_upload ≈ 8.803 ms/layer`
+- `blob_read ≈ 23.300 ms/layer`
+- `tensor_upload ≈ 8.677 ms/layer`
 - `kernel ≈ 0.066 ms/layer`
 
 也就是说，当前 prefill routed MoE 的 GPU 计算只占很小一部分时间；绝大多数时间都花在：
@@ -792,7 +798,7 @@ GB10 上的实测结果如下：
 
 #### 2. `selected_readback` 有固定成本，但不是 prefill 的决定性瓶颈
 
-prefill 里 `selected_readback ≈ 0.747 ms/layer`，量级上比 decode 的 `readback_wait` 小得多，也明显小于：
+prefill 里 `selected_readback ≈ 0.746 ms/layer`，量级上比 decode 的 `readback_wait` 小得多，也明显小于：
 
 - `blob_read`
 - `tensor_upload`
@@ -807,7 +813,7 @@ prefill 里 `selected_readback ≈ 0.747 ms/layer`，量级上比 decode 的 `re
 这两个阶段的平均值只有：
 
 - `layout_pack = 0.002 ms/layer`
-- `selected_write = 0.010 ms/layer`
+- `selected_write = 0.009 ms/layer`
 
 所以：
 
@@ -820,12 +826,11 @@ prefill 里 `selected_readback ≈ 0.747 ms/layer`，量级上比 decode 的 `re
 
 逐层 trace 的前几层和后几层摘录如下：
 
-- `L0`: `blob_read=57.18 ms`, `tensor_upload=14.52 ms`
-- `L1`: `blob_read=49.37 ms`, `tensor_upload=14.17 ms`
-- `L2`: `blob_read=53.16 ms`, `tensor_upload=21.21 ms`
-- `L38`: `blob_read=16.85 ms`, `tensor_upload=6.98 ms`
-- `L39`: `blob_read=23.12 ms`, `tensor_upload=9.59 ms`
-- `L42`: `blob_read=22.03 ms`, `tensor_upload=7.58 ms`
+- `L0`: `blob_read=53.175 ms`
+- `L2`: `tensor_upload=16.698 ms`
+- `L23`: `selected_readback=1.133 ms`
+- `L38`: `selected_write=0.010 ms`
+- `L42`: `kernel≈0.066 ms`
 
 这说明：
 
@@ -845,7 +850,7 @@ prefill 里 `selected_readback ≈ 0.747 ms/layer`，量级上比 decode 的 `re
 
 2. **第二优先级压 `tensor_upload`**
    - 更少的 `gate/up/down` 拆分上传
-   - 更接近“blob streaming direct consume”的 GPU 路径
+   - 但必须避免引入额外 host repack 成本
 
 3. **不要优先优化 `layout_pack` / `selected_write` / `kernel`**
    - 这些阶段太小，不会显著改变 prefill TPS
@@ -862,6 +867,43 @@ prefill 里 `selected_readback ≈ 0.747 ms/layer`，量级上比 decode 的 `re
 - upload 路径
 
 那么 prefill TPS 不会有数量级改善。
+
+#### 已验证失败的方向：GPU 驻留 / staging blob 方案
+
+我们还尝试过一个看起来更接近 decode blob-slot 思路的 prefill 方案：
+
+1. 保留当前 `selected_pack` 顺序读
+2. 在 host 侧把 `gate/up/down` 再重组为单一 `blob staging buffer`
+3. 单次 H2D 上传到 GPU resident blob
+4. 由 `batch external blob` kernel 直接消费
+
+这个方案的目标是压缩 `tensor_upload`，但实测结果没有收益，反而略差：
+
+| Path | read (ms) | upload (ms) | blob_read (ms/layer) | tensor_upload (ms/layer) | prefill t/s | generation t/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `selected-pack + 4/4/64` | `1034.090` | `373.522` | `23.300` | `8.677` | `13.40` | `9.04` |
+| `GPU resident staging blob` | `1078.895` | `382.726` | `24.331` | `8.891` | `12.91` | `9.00` |
+
+这说明 prefill 不能简单套用 decode 的 GPU resident blob 思路，原因有三点：
+
+1. **prefill 的工作集太大，缺少 decode 那种小规模高复用**
+   - prefill 一层是 `30 tokens × top-k 6 = 180 selected pairs`
+   - 去重后 `active_count` 仍然通常是几十到上百个 expert
+   - 这不是 decode 那种“少量 resident slot 命中后长期复用”的场景
+
+2. **staging blob 没有减少上传总字节量**
+   - 只是把 `gate/up/down` 三段上传变成了一次 blob 上传
+   - expert 数据总量不变，因此 H2D 总负载没有本质下降
+
+3. **host 侧多做了一次重排**
+   - `selected-pack` 已经是对 prefill 最友好的 host 顺序读布局
+   - 再把 `gate/up/down` 重组成 blob，会新增一次 host memory copy / repack
+   - 最终既没有显著减少 upload，也轻微抬高了 read / blob_read
+
+因此，当前材料中的结论应该明确修正为：
+
+- **prefill 的正确优化方向仍然是 pack-side sequential IO**
+- **GPU resident blob 更适合 decode，不适合作为当前 prefill 的主优化路线**
 
 ### 7.5 Learned eviction policy：有效，但收益有限
 

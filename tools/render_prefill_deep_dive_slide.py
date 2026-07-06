@@ -42,7 +42,7 @@ txt(24, 18, "FlashMoE: PREFILL Stage Deep Dive", 34, BLUE)
 d.line((28, 92, 1588, 92), fill=BLUE, width=3)
 
 txt(38, 126, "Prefill Routed-MoE Sub-Stage Breakdown", 22, NAVY)
-txt(40, 164, "Measured with DS4_FLASHMOE_TIMING=1 and per-layer trace; current path still uses gate/up/down upload", 16, BLUE)
+txt(40, 164, "Measured with DS4_FLASHMOE_TIMING=1 and per-layer trace; current best default is IO_THREADS=4, MERGE_GAP=4, MAX_WINDOW=64", 16, BLUE)
 
 rect(34, 205, 620, 182, (250, 252, 255), BORDER, 2, 0)
 d.line((42, 211, 42, 378), fill=BLUE, width=6)
@@ -50,10 +50,10 @@ txt(58, 224, "Observed facts", 18, DARK)
 txt(
     58,
     262,
-    "• Prefill summary: read=1057.405 ms, upload=378.972 ms, kernel=2.832 ms over 43 layers.\n"
-    "• Avg per layer: selected_readback 0.747 ms, layout_pack 0.002 ms,\n"
-    "  blob_read 23.842 ms, selected_write 0.010 ms, tensor_upload 8.803 ms, kernel 0.066 ms.\n"
-    "• Prefill TPS observed: 13.04 t/s (one timing view), 10.57 t/s in E2E summary.\n"
+    "• Prefill summary: read=1034.090 ms, upload=373.522 ms, kernel=2.835 ms over 43 layers.\n"
+    "• Avg per layer: selected_readback 0.746 ms, layout_pack 0.002 ms,\n"
+    "  blob_read 23.300 ms, selected_write 0.009 ms, tensor_upload 8.677 ms, kernel 0.066 ms.\n"
+    "• Prefill TPS observed: 13.40 t/s (one timing view), 11.05 t/s in E2E summary.\n"
     "• bytes=20675.25 MiB, n_tokens=30, selected_pairs=180 per layer.",
     16,
     DARK,
@@ -62,9 +62,9 @@ txt(
 
 rect(686, 214, 324, 150, (249, 250, 252), (236, 240, 245), 2, 18)
 txt(848, 234, "Prefill Key Result", 16, GRAY, "ma")
-txt(848, 274, "23.84 ms/layer", 30, BLUE, "ma")
+txt(848, 274, "23.30 ms/layer", 30, BLUE, "ma")
 txt(848, 314, "blob_read dominates", 20, RED, "ma")
-txt(848, 344, "tensor_upload is #2; kernel is negligible", 13, DARK, "ma")
+txt(848, 344, "tensor_upload is #2; GPU resident staging blob was worse", 13, DARK, "ma")
 
 txt(34, 410, "Measured Prefill Breakdown", 20, NAVY)
 table_x, table_y = 34, 446
@@ -72,12 +72,12 @@ col_w = [170, 170, 170, 500]
 row_h = 52
 headers = ["Stage", "Avg ms/layer", "Max ms/layer", "Interpretation"]
 rows = [
-    ["selected_readback", "0.747", "1.002 @ L40", "batch_router_selected readback exists, but is much smaller than blob_read and tensor_upload."],
+    ["selected_readback", "0.746", "1.133 @ L23", "batch_router_selected readback exists, but is much smaller than blob_read and tensor_upload."],
     ["layout_pack", "0.002", "0.002 @ L36", "CPU layout/reindex of selected experts is negligible."],
-    ["blob_read", "23.842", "66.513 @ L2", "Main bottleneck: active expert blob read from layer-pack into host buffers."],
-    ["selected_write", "0.010", "0.012 @ L40", "Write selected_local back to selected_gpu; negligible."],
-    ["tensor_upload", "8.803", "15.662 @ L2", "Second bottleneck: gate/up/down expert tensor upload to GPU."],
-    ["kernel", "0.066", "0.154 @ L0", "Routed MoE batch kernel is tiny; prefill is not compute-bound."],
+    ["blob_read", "23.300", "53.175 @ L0", "Main bottleneck: active expert blob read from layer-pack into host buffers."],
+    ["selected_write", "0.009", "0.010 @ L38", "Write selected_local back to selected_gpu; negligible."],
+    ["tensor_upload", "8.677", "16.698 @ L2", "Second bottleneck: gate/up/down expert tensor upload to GPU."],
+    ["kernel", "0.066", "0.153 @ L0", "Routed MoE batch kernel is tiny; prefill is not compute-bound."],
 ]
 
 x = table_x
@@ -104,10 +104,10 @@ bar_max_w = 360
 scale = bar_max_w / 25.0
 
 stages = [
-    ("blob_read\n(SSD -> host blob)", 23.842, 66.513, RED),
-    ("tensor_upload\n(gate/up/down -> GPU)", 8.803, 15.662, ORANGE),
-    ("selected_readback\n(GPU -> CPU)", 0.747, 1.002, BLUE),
-    ("kernel\n(routed MoE batch)", 0.066, 0.154, GREEN),
+    ("blob_read\n(SSD -> host blob)", 23.300, 53.175, RED),
+    ("tensor_upload\n(gate/up/down -> GPU)", 8.677, 16.698, ORANGE),
+    ("selected_readback\n(GPU -> CPU)", 0.746, 1.133, BLUE),
+    ("kernel\n(routed MoE batch)", 0.066, 0.153, GREEN),
     ("layout_pack\n(CPU re-layout)", 0.002, 0.002, GRAY),
 ]
 
@@ -122,17 +122,16 @@ for label, avg, mx, color in stages:
 
 txt(1200, 666, "PRIMARY BOTTLENECK", 17, RED, "ma")
 txt(1200, 695, "blob_read", 30, RED, "ma")
-txt(1200, 733, "Prefill is dominated by expert read IO,\nnot by routed kernel math.", 16, DARK, "ma", spacing=7)
+txt(1200, 733, "Prefill is dominated by expert read IO;\nGPU resident staging blob did not help upload.", 16, DARK, "ma", spacing=7)
 
 rect(1060, 768, 560, 140, (233, 247, 236), (200, 230, 206), 2, 12)
 txt(1080, 786, "Optimization direction", 20, GREEN)
 txt(
     1080,
     824,
-    "1. Prioritize blob_read: faster expert-read path, stronger page-cache hot path,\n"
-    "   more contiguous layer-pack layout.\n"
-    "2. Then reduce tensor_upload: move prefill toward blob streaming direct consume,\n"
-    "   instead of re-uploading gate/up/down tensors.\n"
+    "1. Prioritize blob_read: pack-side sequential IO is still the right direction.\n"
+    "2. Keep gate/up/down upload path: GPU resident staging blob added repack cost\n"
+    "   without reducing upload bytes, so it underperformed.\n"
     "3. Do not prioritize layout_pack or kernel; they are already negligible.",
     15,
     DARK,
@@ -143,7 +142,7 @@ rect(34, 882, 990, 48, (233, 247, 236), (200, 230, 206), 2, 10)
 txt(
     48,
     894,
-    "※ Key Takeaway: current FlashMoE prefill is bottlenecked first by expert blob read (~23.8 ms/layer), second by tensor upload (~8.8 ms/layer); routed kernel itself is tiny (~0.066 ms/layer), so prefill is data-path bound, not compute-bound.",
+    "※ Key Takeaway: current FlashMoE prefill is bottlenecked first by expert blob read (~23.3 ms/layer), second by tensor upload (~8.7 ms/layer); the best path remains selected-pack + 4/4/64 IO tuning, while GPU resident staging blob was verified ineffective.",
     14,
     GREEN,
 )
