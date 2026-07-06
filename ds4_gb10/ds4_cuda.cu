@@ -10571,21 +10571,6 @@ extern "C" int ds4_gpu_routed_moe_batch_external_tensor(ds4_gpu_tensor *out, ds4
                                   expert_in_dim, expert_mid_dim, out_dim,
                                   selected, weights, n_expert, clamp, x, n_tokens);
 }
-extern "C" int ds4_gpu_routed_moe_batch_external_blob_tensor(ds4_gpu_tensor *out, ds4_gpu_tensor *gate, ds4_gpu_tensor *up, ds4_gpu_tensor *mid, ds4_gpu_tensor *down, const ds4_gpu_tensor *blob_w, uint32_t gate_type, uint32_t down_type, uint64_t blob_stride, uint64_t gate_bytes, uint64_t up_bytes, uint64_t gate_row_bytes, uint64_t down_row_bytes, uint32_t expert_count, uint32_t expert_in_dim, uint32_t expert_mid_dim, uint32_t out_dim, const ds4_gpu_tensor *selected, const ds4_gpu_tensor *weights, uint32_t n_expert, float clamp, const ds4_gpu_tensor *x, uint32_t n_tokens, bool *mid_is_f16) {
-    if (mid_is_f16) *mid_is_f16 = false;
-    if (!blob_w) return 0;
-    if (blob_w->bytes < (uint64_t)expert_count * blob_stride) return 0;
-    const char *blob = (const char *)blob_w->ptr;
-    return routed_moe_launch_core(out, gate, up, mid, down,
-                                  blob,
-                                  blob + gate_bytes,
-                                  blob + gate_bytes + up_bytes,
-                                  gate_type, down_type,
-                                  blob_stride, gate_row_bytes,
-                                  blob_stride, down_row_bytes,
-                                  expert_in_dim, expert_mid_dim, out_dim,
-                                  selected, weights, n_expert, clamp, x, n_tokens);
-}
 extern "C" int ds4_gpu_hc_split_sinkhorn_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *mix, const void *model_map, uint64_t model_size, uint64_t scale_offset, uint64_t base_offset, uint32_t n_hc, uint32_t sinkhorn_iters, float eps) {
     if (!out || !mix || !model_map || n_hc != 4) return 0;
     const uint64_t mix_bytes = 24ull * sizeof(float);
