@@ -532,6 +532,11 @@ static uint32_t flashmoe_io_merge_gap(uint32_t n_experts) {
     return parse_u32_env("DS4_FLASHMOE_IO_MERGE_GAP", fallback);
 }
 
+static uint32_t flashmoe_io_max_window_experts(uint32_t n_experts) {
+    const uint32_t fallback = n_experts >= 64u ? 64u : (n_experts >= 16u ? 32u : 0u);
+    return parse_u32_env("DS4_FLASHMOE_IO_MAX_WINDOW_EXPERTS", fallback);
+}
+
 typedef struct {
     uint32_t start_index;
     uint32_t run_count;
@@ -575,6 +580,7 @@ static uint32_t flashmoe_build_read_runs(const uint16_t *expert_ids,
                                          uint32_t n_experts,
                                          uint32_t num_experts,
                                          uint32_t merge_gap,
+                                         uint32_t max_window_experts,
                                          ds4_flashmoe_read_run *runs) {
     if (!expert_ids || !runs || n_experts == 0) return 0;
     uint32_t run_count = 0;
@@ -589,6 +595,8 @@ static uint32_t flashmoe_build_read_runs(const uint16_t *expert_ids,
             if (next_expert >= num_experts || next_expert < last_expert) break;
             const uint32_t gap = (uint32_t)next_expert - (uint32_t)last_expert - 1u;
             if (gap > merge_gap) break;
+            if (max_window_experts != 0u &&
+                (uint32_t)next_expert - (uint32_t)first_expert + 1u > max_window_experts) break;
             last_expert = next_expert;
             run_end++;
         }
@@ -983,8 +991,14 @@ int ds4_flashmoe_runtime_load_selected_pack(uint16_t layer_id,
         return 1;
     }
     const uint32_t merge_gap = flashmoe_io_merge_gap(n_experts);
+    const uint32_t max_window_experts = flashmoe_io_max_window_experts(n_experts);
     const uint32_t run_count =
-            flashmoe_build_read_runs(expert_ids, n_experts, (uint32_t)layer_pack->num_experts, merge_gap, runs);
+            flashmoe_build_read_runs(expert_ids,
+                                     n_experts,
+                                     (uint32_t)layer_pack->num_experts,
+                                     merge_gap,
+                                     max_window_experts,
+                                     runs);
     uint32_t io_threads = flashmoe_select_io_threads(run_count);
     if (run_count <= 1u || io_threads == 1u) {
         ds4_flashmoe_read_job job = {
@@ -1168,8 +1182,14 @@ int ds4_flashmoe_runtime_load_selected_blobs(uint16_t layer_id,
         sorted_out[j] = out_index;
     }
     const uint32_t merge_gap = flashmoe_io_merge_gap(n_experts);
+    const uint32_t max_window_experts = flashmoe_io_max_window_experts(n_experts);
     const uint32_t run_count =
-            flashmoe_build_read_runs(sorted_ids, n_experts, (uint32_t)layer_pack->num_experts, merge_gap, runs);
+            flashmoe_build_read_runs(sorted_ids,
+                                     n_experts,
+                                     (uint32_t)layer_pack->num_experts,
+                                     merge_gap,
+                                     max_window_experts,
+                                     runs);
     uint32_t io_threads = flashmoe_select_io_threads(run_count);
     if (run_count <= 1u || io_threads == 1u) {
         ds4_flashmoe_blob_read_job job = {
