@@ -528,12 +528,12 @@ static bool read_fully_at(int fd, uint8_t *dst, uint64_t bytes, uint64_t offset)
 }
 
 static uint32_t flashmoe_io_merge_gap(uint32_t n_experts) {
-    const uint32_t fallback = n_experts >= 16u ? 2u : 0u;
+    const uint32_t fallback = n_experts >= 16u ? 4u : 0u;
     return parse_u32_env("DS4_FLASHMOE_IO_MERGE_GAP", fallback);
 }
 
 static uint32_t flashmoe_io_max_window_experts(uint32_t n_experts) {
-    const uint32_t fallback = n_experts >= 64u ? 64u : (n_experts >= 16u ? 32u : 0u);
+    const uint32_t fallback = n_experts >= 16u ? 64u : 0u;
     return parse_u32_env("DS4_FLASHMOE_IO_MAX_WINDOW_EXPERTS", fallback);
 }
 
