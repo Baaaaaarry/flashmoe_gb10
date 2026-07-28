@@ -1,0 +1,24 @@
+{
+  "output": "/Users/libo/Work/flashMoE/ds4_gb10/docs/gb10-ds4-migration-two-pages.pptx",
+  "slideCount": 2,
+  "previewDir": "/Users/libo/Work/flashMoE/outputs/manual-20260728/presentations/gb10-ds4-migration/preview",
+  "previewPaths": [
+    "/Users/libo/Work/flashMoE/outputs/manual-20260728/presentations/gb10-ds4-migration/preview/slide-01.png",
+    "/Users/libo/Work/flashMoE/outputs/manual-20260728/presentations/gb10-ds4-migration/preview/slide-02.png"
+  ],
+  "layoutDir": "/Users/libo/Work/flashMoE/outputs/manual-20260728/presentations/gb10-ds4-migration/layout/final",
+  "slides": [
+    {
+      "index": 1,
+      "requestedSlideNumber": 1,
+      "modulePath": "/Users/libo/Work/flashMoE/outputs/manual-20260728/presentations/gb10-ds4-migration/slides/slide-01.mjs",
+      "exportName": "slide01"
+    },
+    {
+      "index": 2,
+      "requestedSlideNumber": 2,
+      "modulePath": "/Users/libo/Work/flashMoE/outputs/manual-20260728/presentations/gb10-ds4-migration/slides/slide-02.mjs",
+      "exportName": "slide02"
+    }
+  ]
+}
