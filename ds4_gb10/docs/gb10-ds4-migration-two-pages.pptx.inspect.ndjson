@@ -1,278 +1,278 @@
-{"kind":"deck","id":"pr/r5cjjc","name":"Deck"}
-{"kind":"layout","layoutId":"03815d39-68ab-43f7-87c2-99d114376b44","name":"Master","type":"master"}
-{"kind":"layout","layoutId":"bd930359-388c-4bd2-97b5-43bea40542ab","name":"Title Slide","type":"title"}
-{"kind":"slide","id":"sl/03bft0","slide":1,"title":"从 Metal 到 CUDA：为什么必须重做 DS4 端侧运行时","textShapes":59}
-{"kind":"textbox","id":"sh/lsfyx8za","slide":1,"text":"从 Metal 到 CUDA：为什么必须重做 DS4 端侧运行时","textPreview":"从 Metal 到 CUDA：为什么必须重做 DS4 端侧运行时","textChars":32,"textLines":1,"bbox":[28,14,980,42]}
-{"kind":"shape","id":"sh/ypofmtgj","slide":1,"bbox":[28,55,1224,3]}
-{"kind":"shape","id":"sh/zqxgvyh4","slide":1,"bbox":[28,104,720,270]}
-{"kind":"shape","id":"sh/cnmxk3yd","slide":1,"bbox":[28,70,720,34]}
-{"kind":"textbox","id":"sh/dovytozy","slide":1,"text":"迁移必要性：Metal 路线无法直接复用于 GB10","textPreview":"迁移必要性：Metal 路线无法直接复用于 GB10","textChars":26,"textLines":1,"bbox":[42,77,692,20]}
-{"kind":"shape","id":"sh/q14fitgn","slide":1,"bbox":[772,104,508,270]}
-{"kind":"shape","id":"sh/bmdwryhs","slide":1,"bbox":[772,70,508,34]}
-{"kind":"textbox","id":"sh/ozmxgjyh","slide":1,"text":"我们为什么选择 CUDA 原生重构","textPreview":"我们为什么选择 CUDA 原生重构","textChars":17,"textLines":1,"bbox":[786,77,480,20]}
-{"kind":"shape","id":"sh/p0vepoz2","slide":1,"bbox":[42,118,108,36]}
-{"kind":"shape","id":"sh/d4fm9cbq","slide":1,"bbox":[150,118,584,36]}
-{"kind":"textbox","id":"sh/s365g7u5","slide":1,"text":"平台绑定","textPreview":"平台绑定","textChars":4,"textLines":1,"bbox":[46,128,100,16]}
-{"kind":"textbox","id":"sh/r2x472tk","slide":1,"text":"DS4 原始路线围绕 Apple unified memory + Metal kernel 组织，底层算子和数据流天然贴合苹果执行栈。","textPreview":"DS4 原始路线围绕 Apple unified memory + Metal kernel 组织，底层算子和数据流天然贴合苹果执行栈。","textChars":68,"textLines":1,"bbox":[160,125,564,22]}
-{"kind":"shape","id":"sh/q1onexcz","slide":1,"bbox":[42,160,108,36]}
-{"kind":"shape","id":"sh/50fm5cbe","slide":1,"bbox":[150,160,584,36]}
-{"kind":"textbox","id":"sh/4z65c7ut","slide":1,"text":"闭源限制","textPreview":"闭源限制","textChars":4,"textLines":1,"bbox":[46,170,100,16]}
-{"kind":"textbox","id":"sh/3yx432t8","slide":1,"text":"Metal / MPS / Apple 系统栈的大量关键行为是黑盒，很多性能行为可观察但不可改写，无法作为 GB10 的工程基座。","textPreview":"Metal / MPS / Apple 系统栈的大量关键行为是黑盒，很多性能行为可观察但不可改写，无法作为 GB10 的工程基座。","textChars":65,"textLines":1,"bbox":[160,167,564,22]}
-{"kind":"shape","id":"sh/ix4naxc3","slide":1,"bbox":[42,202,108,36]}
-{"kind":"shape","id":"sh/hwvm1sbi","slide":1,"bbox":[150,202,584,36]}
-{"kind":"textbox","id":"sh/gvm58nux","slide":1,"text":"框架限制","textPreview":"框架限制","textChars":4,"textLines":1,"bbox":[46,212,100,16]}
-{"kind":"textbox","id":"sh/8fq5on2t","slide":1,"text":"原实现部分生命周期深度绑定上层框架与参数树；底层 runtime、page-cache 路径、内存策略不能按 GB10 目标任意修改。","textPreview":"原实现部分生命周期深度绑定上层框架与参数树；底层 runtime、page-cache 路径、内存策略不能按 GB10 目标任意修改。","textChars":67,"textLines":1,"bbox":[160,209,564,22]}
-{"kind":"shape","id":"sh/9gzmhsje","slide":1,"bbox":[42,244,108,36]}
-{"kind":"shape","id":"sh/md8nmxkn","slide":1,"bbox":[150,244,584,36]}
-{"kind":"textbox","id":"sh/7eh4f218","slide":1,"text":"硬件差异","textPreview":"硬件差异","textChars":4,"textLines":1,"bbox":[46,254,100,16]}
-{"kind":"textbox","id":"sh/kbq5kn2h","slide":1,"text":"GB10 面对的是 UMA + CUDA + SSD expert store，需要显式处理 SSD→DDR→GPU copy/compute overlap，Metal 方案没有现成答案。","textPreview":"GB10 面对的是 UMA + CUDA + SSD expert store，需要显式处理 SSD→DDR→GPU copy/compute overlap，Metal 方案没有现成答案。","textChars":95,"textLines":1,"bbox":[160,251,564,22]}
-{"kind":"shape","id":"sh/lczmdsj2","slide":1,"bbox":[42,286,108,36]}
-{"kind":"shape","id":"sh/y9onidkr","slide":1,"bbox":[150,286,584,36]}
-{"kind":"textbox","id":"sh/zax4bi1w","slide":1,"text":"产品要求","textPreview":"产品要求","textChars":4,"textLines":1,"bbox":[46,296,100,16]}
-{"kind":"textbox","id":"sh/47a5w721","slide":1,"text":"我们需要可控的 profile、cache policy、服务化接口和后续在线部署能力，这要求运行时必须完全可改、可测、可演进。","textPreview":"我们需要可控的 profile、cache policy、服务化接口和后续在线部署能力，这要求运行时必须完全可改、可测、可演进。","textChars":64,"textLines":1,"bbox":[160,293,564,22]}
-{"kind":"textbox","id":"sh/58j6pcj6","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[788,118,16,19.5]}
-{"kind":"textbox","id":"sh/f258v6lo","slide":1,"text":"不能只做“Metal kernel → CUDA kernel”的语法级替换；真正要迁移的是 streamed-MoE 的控制面思想。","textPreview":"不能只做“Metal kernel → CUDA kernel”的语法级替换；真正要迁移的是 streamed-MoE 的控制面思想。","textChars":67,"textLines":1,"bbox":[804,118,460,21.5]}
-{"kind":"textbox","id":"sh/e1c7ml43","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[788,172,16,19.5]}
-{"kind":"textbox","id":"sh/14nqxg3e","slide":1,"text":"必须把冷数据读取、expert cache、decode scheduler、service interface 全部从苹果黑盒依赖中解耦出来。","textPreview":"必须把冷数据读取、expert cache、decode scheduler、service interface 全部从苹果黑盒依赖中解耦出来。","textChars":72,"textLines":1,"bbox":[804,172,460,21.5]}
-{"kind":"textbox","id":"sh/03epobm9","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[788,226,16,19.5]}
-{"kind":"textbox","id":"sh/n658zqlk","slide":1,"text":"只有这样，后续才能继续做带宽建模、命中率分析、Nsight/profile、在线服务化与多模型扩展。","textPreview":"只有这样，后续才能继续做带宽建模、命中率分析、Nsight/profile、在线服务化与多模型扩展。","textChars":50,"textLines":1,"bbox":[804,226,460,21.5]}
-{"kind":"shape","id":"sh/25wrql4z","slide":1,"bbox":[786,286,480,56]}
-{"kind":"textbox","id":"sh/p8nq103q","slide":1,"text":"结论：迁移不是为了“换个后端”，而是为了拿回底层可控性，建立能面向 GB10 长期演进的运行时底座。","textPreview":"结论：迁移不是为了“换个后端”，而是为了拿回底层可控性，建立能面向 GB10 长期演进的运行时底座。","textChars":50,"textLines":1,"bbox":[796,298,460,30]}
-{"kind":"shape","id":"sh/o7e9svm5","slide":1,"bbox":[28,392,1224,146]}
-{"kind":"shape","id":"sh/jal8nmlg","slide":1,"bbox":[28,392,1224,34]}
-{"kind":"textbox","id":"sh/i9s7e14v","slide":1,"text":"迁移映射：从 Apple/Metal 约束，转换到 GB10/CUDA 可控运行时","textPreview":"迁移映射：从 Apple/Metal 约束，转换到 GB10/CUDA 可控运行时","textChars":41,"textLines":1,"bbox":[42,399,1180,20]}
-{"kind":"shape","id":"sh/atw7u1cr","slide":1,"bbox":[28,426,176,30]}
-{"kind":"textbox","id":"sh/ve5836tc","slide":1,"text":"维度","textPreview":"维度","textChars":2,"textLines":1,"bbox":[32,433,168,16]}
-{"kind":"shape","id":"sh/wfy9wbux","slide":1,"bbox":[204,426,260,30]}
-{"kind":"textbox","id":"sh/xg7q5wb2","slide":1,"text":"Apple / Metal 原始状态","textPreview":"Apple / Metal 原始状态","textChars":18,"textLines":1,"bbox":[208,433,252,16]}
-{"kind":"shape","id":"sh/ihgry1cn","slide":1,"bbox":[464,426,260,30]}
-{"kind":"textbox","id":"sh/jip876t8","slide":1,"text":"为什么不够","textPreview":"为什么不够","textChars":5,"textLines":1,"bbox":[468,433,252,16]}
-{"kind":"shape","id":"sh/kjy90but","slide":1,"bbox":[724,426,252,30]}
-{"kind":"textbox","id":"sh/5k7q9gbe","slide":1,"text":"GB10 / CUDA 改造","textPreview":"GB10 / CUDA 改造","textChars":14,"textLines":1,"bbox":[728,433,244,16]}
-{"kind":"shape","id":"sh/6lgr2lcz","slide":1,"bbox":[976,426,276,30]}
-{"kind":"textbox","id":"sh/7mp8bqtk","slide":1,"text":"结果","textPreview":"结果","textChars":2,"textLines":1,"bbox":[980,433,268,16]}
-{"kind":"shape","id":"sh/1sv2h4zy","slide":1,"bbox":[28,456,176,18]}
-{"kind":"textbox","id":"sh/0r21ozid","slide":1,"text":"执行栈","textPreview":"执行栈","textChars":3,"textLines":1,"bbox":[33,458,166,13]}
-{"kind":"shape","id":"sh/fqtkfe1s","slide":1,"bbox":[204,456,260,18]}
-{"kind":"textbox","id":"sh/epkjm907","slide":1,"text":"Metal / MPS / Apple runtime","textPreview":"Metal / MPS / Apple runtime","textChars":27,"textLines":1,"bbox":[209,458,250,13]}
-{"kind":"shape","id":"sh/pgv2lozu","slide":1,"bbox":[464,456,260,18]}
-{"kind":"textbox","id":"sh/ofmlsji9","slide":1,"text":"底层黑盒，无法按 GB10 目标重排数据流","textPreview":"底层黑盒，无法按 GB10 目标重排数据流","textChars":21,"textLines":1,"bbox":[469,458,250,13]}
-{"kind":"shape","id":"sh/nedkjeho","slide":1,"bbox":[724,456,252,18]}
-{"kind":"textbox","id":"sh/2t4jq90j","slide":1,"text":"CUDA / Tensor Core kernel","textPreview":"CUDA / Tensor Core kernel","textChars":25,"textLines":1,"bbox":[729,458,242,13]}
-{"kind":"shape","id":"sh/xkf2poz6","slide":1,"bbox":[976,456,276,18]}
-{"kind":"textbox","id":"sh/cj6lw3il","slide":1,"text":"获得 kernel、copy、调度全链路可控性","textPreview":"获得 kernel、copy、调度全链路可控性","textChars":23,"textLines":1,"bbox":[981,458,266,13]}
-{"kind":"shape","id":"sh/wne5s7qh","slide":1,"bbox":[28,474,176,18]}
-{"kind":"textbox","id":"sh/xonmlc72","slide":1,"text":"参数组织","textPreview":"参数组织","textChars":4,"textLines":1,"bbox":[33,476,166,13]}
-{"kind":"shape","id":"sh/alc3qx8r","slide":1,"bbox":[204,474,260,18]}
-{"kind":"textbox","id":"sh/vml4j2pw","slide":1,"text":"框架参数树强耦合","textPreview":"框架参数树强耦合","textChars":8,"textLines":1,"bbox":[209,476,250,13]}
-{"kind":"shape","id":"sh/kre5w7qt","slide":1,"bbox":[464,474,260,18]}
-{"kind":"textbox","id":"sh/5snmpc7e","slide":1,"text":"无法显式拆开 dense resident 与 expert store","textPreview":"无法显式拆开 dense resident 与 expert store","textChars":36,"textLines":1,"bbox":[469,476,250,13]}
-{"kind":"shape","id":"sh/ipwnuh8n","slide":1,"bbox":[724,474,252,18]}
-{"kind":"textbox","id":"sh/jq54n2p8","slide":1,"text":"dense resident + manifest expert store","textPreview":"dense resident + manifest expert store","textChars":38,"textLines":1,"bbox":[729,476,242,13]}
-{"kind":"shape","id":"sh/0valknq9","slide":1,"bbox":[976,474,276,18]}
-{"kind":"textbox","id":"sh/lw3mds7u","slide":1,"text":"支持热冷分层与可测 miss 成本","textPreview":"支持热冷分层与可测 miss 成本","textChars":17,"textLines":1,"bbox":[981,476,266,13]}
-{"kind":"shape","id":"sh/3q98zq9c","slide":1,"bbox":[28,492,176,18]}
-{"kind":"textbox","id":"sh/2p07qls7","slide":1,"text":"冷数据读取","textPreview":"冷数据读取","textChars":5,"textLines":1,"bbox":[33,494,166,13]}
-{"kind":"shape","id":"sh/pcrq10ri","slide":1,"bbox":[204,492,260,18]}
-{"kind":"textbox","id":"sh/obipsvax","slide":1,"text":"page-cache 风格读取","textPreview":"page-cache 风格读取","textChars":15,"textLines":1,"bbox":[209,494,250,13]}
-{"kind":"shape","id":"sh/fmpov69g","slide":1,"bbox":[464,492,260,18]}
-{"kind":"textbox","id":"sh/ulg7m1sv","slide":1,"text":"难以准确控制 load path 和预取策略","textPreview":"难以准确控制 load path 和预取策略","textChars":22,"textLines":1,"bbox":[469,494,250,13]}
-{"kind":"shape","id":"sh/1or6xgrm","slide":1,"bbox":[724,492,252,18]}
-{"kind":"textbox","id":"sh/gnipoba1","slide":1,"text":"chunked pread + explicit cache","textPreview":"chunked pread + explicit cache","textChars":30,"textLines":1,"bbox":[729,494,242,13]}
-{"kind":"shape","id":"sh/7ipor69k","slide":1,"bbox":[976,492,276,18]}
-{"kind":"textbox","id":"sh/6hg7i1sz","slide":1,"text":"可做带宽建模和命中率优化","textPreview":"可做带宽建模和命中率优化","textChars":12,"textLines":1,"bbox":[981,494,266,13]}
-{"kind":"shape","id":"sh/id4zu54r","slide":1,"bbox":[28,510,176,18]}
-{"kind":"textbox","id":"sh/jedgnalc","slide":1,"text":"运行时接口","textPreview":"运行时接口","textChars":5,"textLines":1,"bbox":[33,512,166,13]}
-{"kind":"shape","id":"sh/kfmhwvmx","slide":1,"bbox":[204,510,260,18]}
-{"kind":"textbox","id":"sh/5gvyp03i","slide":1,"text":"更偏实验性实现","textPreview":"更偏实验性实现","textChars":7,"textLines":1,"bbox":[209,512,250,13]}
-{"kind":"shape","id":"sh/a9kfql4v","slide":1,"bbox":[464,510,260,18]}
-{"kind":"textbox","id":"sh/vatgjqlg","slide":1,"text":"难服务化、难长期维护","textPreview":"难服务化、难长期维护","textChars":10,"textLines":1,"bbox":[469,512,250,13]}
-{"kind":"shape","id":"sh/wb2hsvm1","slide":1,"bbox":[724,510,252,18]}
-{"kind":"textbox","id":"sh/xcbyl036","slide":1,"text":"engine / session / service","textPreview":"engine / session / service","textChars":26,"textLines":1,"bbox":[729,512,242,13]}
-{"kind":"shape","id":"sh/e5oz2p4z","slide":1,"bbox":[976,510,276,18]}
-{"kind":"textbox","id":"sh/f6xgvulk","slide":1,"text":"形成可部署、可扩展的产品底座","textPreview":"形成可部署、可扩展的产品底座","textChars":14,"textLines":1,"bbox":[981,512,266,13]}
-{"kind":"shape","id":"sh/p0z2lonm","slide":1,"bbox":[28,588,392,82]}
-{"kind":"shape","id":"sh/ozq1sj61","slide":1,"bbox":[28,554,392,34]}
-{"kind":"textbox","id":"sh/3yhkje5w","slide":1,"text":"闭源与框架约束","textPreview":"闭源与框架约束","textChars":7,"textLines":1,"bbox":[42,561,364,20]}
-{"kind":"shape","id":"sh/2x8jq9ob","slide":1,"bbox":[444,588,392,82]}
-{"kind":"shape","id":"sh/1wfih4nq","slide":1,"bbox":[444,554,392,34]}
-{"kind":"textbox","id":"sh/gb61oz65","slide":1,"text":"我们已经完成的重构","textPreview":"我们已经完成的重构","textChars":9,"textLines":1,"bbox":[458,561,364,20]}
-{"kind":"shape","id":"sh/fax0fu5k","slide":1,"bbox":[860,588,392,82]}
-{"kind":"shape","id":"sh/e9ojm9oz","slide":1,"bbox":[860,554,392,34]}
-{"kind":"textbox","id":"sh/lsj2t8nu","slide":1,"text":"本页结论","textPreview":"本页结论","textChars":4,"textLines":1,"bbox":[874,561,364,20]}
-{"kind":"textbox","id":"sh/0ra10369","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,602,16,18.3]}
-{"kind":"textbox","id":"sh/t0jqt876","slide":1,"text":"原始 Metal 路线很多关键能力可观察但不可改。","textPreview":"原始 Metal 路线很多关键能力可观察但不可改。","textChars":25,"textLines":1,"bbox":[60,602,348,20.3]}
-{"kind":"textbox","id":"sh/sza903q1","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,628,16,18.3]}
-{"kind":"textbox","id":"sh/re18rypg","slide":1,"text":"底层框架和系统栈不是我们可长期依赖的可控资产。","textPreview":"底层框架和系统栈不是我们可长期依赖的可控资产。","textChars":23,"textLines":1,"bbox":[60,628,348,20.3]}
-{"kind":"textbox","id":"sh/6dsryd8v","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,602,16,18.3]}
-{"kind":"textbox","id":"sh/5cjqp8ra","slide":1,"text":"保留 streamed-MoE 控制面思想。","textPreview":"保留 streamed-MoE 控制面思想。","textChars":22,"textLines":1,"bbox":[476,602,348,20.3]}
-{"kind":"textbox","id":"sh/4bq9w3qp","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,628,16,18.3]}
-{"kind":"textbox","id":"sh/jah8ny94","slide":1,"text":"重写 dense resident / expert store / hot cache / scheduler。","textPreview":"重写 dense resident / expert store / hot cache / scheduler。","textChars":57,"textLines":1,"bbox":[476,628,348,20.3]}
-{"kind":"textbox","id":"sh/i98rut8j","slide":1,"text":"我们迁移的不是 Metal 本身，而是 DS4 的思路；我们重做的是底层 runtime，以便在 GB10 上真正可控、可调、可产品化。","textPreview":"我们迁移的不是 Metal 本身，而是 DS4 的思路；我们重做的是底层 runtime，以便在 GB10 上真正可控、可调、可产品化。","textChars":68,"textLines":1,"bbox":[876,604,360,40]}
-{"kind":"shape","id":"sh/h8zqlore","slide":1,"bbox":[28,682,1224,24]}
-{"kind":"textbox","id":"sh/w7q9sjqt","slide":1,"text":"Takeaway：从 Metal 转向 CUDA 的根本原因，是 Apple 路线闭源、黑盒、难改，无法支撑 GB10 所需的底层可控性与后续产品化演进。","textPreview":"Takeaway：从 Metal 转向 CUDA 的根本原因，是 Apple 路线闭源、黑盒、难改，无法支撑 GB10 所需的底层可控性与后续产品化演进。","textChars":77,"textLines":1,"bbox":[42,686,1192,16]}
-{"kind":"notes","id":"nt/03bft0","slide":1,"text":""}
-{"kind":"slide","id":"sl/hhladr","slide":2,"title":"GB10 端侧优化与体验差距：为什么还需要云端模型补齐","textShapes":84}
-{"kind":"textbox","id":"sh/x8j69onm","slide":2,"text":"GB10 端侧优化与体验差距：为什么还需要云端模型补齐","textPreview":"GB10 端侧优化与体验差距：为什么还需要云端模型补齐","textChars":27,"textLines":1,"bbox":[28,14,990,42]}
-{"kind":"shape","id":"sh/a5snytob","slide":2,"bbox":[28,55,1224,3]}
-{"kind":"shape","id":"sh/b61o7y5w","slide":2,"bbox":[28,106,730,190]}
-{"kind":"shape","id":"sh/oja5wj65","slide":2,"bbox":[28,72,730,34]}
-{"kind":"textbox","id":"sh/pkj65onq","slide":2,"text":"跑通 FlashMoE 版本 + 软件深度优化性能的关键实现","textPreview":"跑通 FlashMoE 版本 + 软件深度优化性能的关键实现","textChars":30,"textLines":1,"bbox":[42,79,702,20]}
-{"kind":"shape","id":"sh/2h8nu9oz","slide":2,"bbox":[782,106,470,190]}
-{"kind":"shape","id":"sh/ni1o3e5k","slide":2,"bbox":[782,72,470,34]}
-{"kind":"textbox","id":"sh/0fq5sz6t","slide":2,"text":"实测性能与用户体验差距","textPreview":"实测性能与用户体验差距","textChars":11,"textLines":1,"bbox":[796,79,442,20]}
-{"kind":"shape","id":"sh/1gz614ne","slide":2,"bbox":[42,120,116,30]}
-{"kind":"textbox","id":"sh/5oz6lor2","slide":2,"text":"类别","textPreview":"类别","textChars":2,"textLines":1,"bbox":[46,127,108,16]}
-{"kind":"shape","id":"sh/4n6psjah","slide":2,"bbox":[158,120,190,30]}
-{"kind":"textbox","id":"sh/3mxoje9w","slide":2,"text":"关键修改点","textPreview":"关键修改点","textChars":5,"textLines":1,"bbox":[162,127,182,16]}
-{"kind":"shape","id":"sh/ilo7q9sb","slide":2,"bbox":[348,120,202,30]}
-{"kind":"textbox","id":"sh/h0f6x4r6","slide":2,"text":"深度优化实现","textPreview":"深度优化实现","textChars":6,"textLines":1,"bbox":[352,127,194,16]}
-{"kind":"shape","id":"sh/gz6pozal","slide":2,"bbox":[550,120,192,30]}
-{"kind":"textbox","id":"sh/vyxovu90","slide":2,"text":"价值","textPreview":"价值","textChars":2,"textLines":1,"bbox":[554,127,184,16]}
-{"kind":"shape","id":"sh/uxonmpsf","slide":2,"bbox":[42,150,116,16]}
-{"kind":"textbox","id":"sh/twf6t4ru","slide":2,"text":"跑通修改 1","textPreview":"跑通修改 1","textChars":6,"textLines":1,"bbox":[46,152,108,12]}
-{"kind":"shape","id":"sh/8vm5kza9","slide":2,"bbox":[158,150,190,16]}
-{"kind":"textbox","id":"sh/kfqp0zi5","slide":2,"text":"把 DS4 2bit 路线改成可运行 FlashMoE 版本","textPreview":"把 DS4 2bit 路线改成可运行 FlashMoE 版本","textChars":30,"textLines":1,"bbox":[162,152,182,12]}
-{"kind":"shape","id":"sh/lgz694zq","slide":2,"bbox":[348,150,202,16]}
-{"kind":"textbox","id":"sh/yd87yp0z","slide":2,"text":"重建模型加载、权重组织与执行入口","textPreview":"重建模型加载、权重组织与执行入口","textChars":16,"textLines":1,"bbox":[352,152,194,12]}
-{"kind":"shape","id":"sh/zeho7uhk","slide":2,"bbox":[550,150,192,16]}
-{"kind":"textbox","id":"sh/cbqpwfi9","slide":2,"text":"先解决“能不能在 GB10 上跑起来”","textPreview":"先解决“能不能在 GB10 上跑起来”","textChars":19,"textLines":1,"bbox":[554,152,184,12]}
-{"kind":"shape","id":"sh/dcz65kzu","slide":2,"bbox":[42,166,116,16]}
-{"kind":"textbox","id":"sh/q9o7up03","slide":2,"text":"跑通修改 2","textPreview":"跑通修改 2","textChars":6,"textLines":1,"bbox":[46,168,108,12]}
-{"kind":"shape","id":"sh/baho3uho","slide":2,"bbox":[158,166,190,16]}
-{"kind":"textbox","id":"sh/w7ap8jid","slide":2,"text":"把专家权重从框架参数树中解耦","textPreview":"把专家权重从框架参数树中解耦","textChars":14,"textLines":1,"bbox":[162,168,182,12]}
-{"kind":"shape","id":"sh/h8jqhozy","slide":2,"bbox":[348,166,202,16]}
-{"kind":"textbox","id":"sh/rep0nm5c","slide":2,"text":"dense resident + layer-major expert store","textPreview":"dense resident + layer-major expert store","textChars":41,"textLines":1,"bbox":[352,168,194,12]}
-{"kind":"shape","id":"sh/qdwjuhor","slide":2,"bbox":[550,166,192,16]}
-{"kind":"textbox","id":"sh/dg7ipcni","slide":2,"text":"形成热冷分层，支持后续专家流式访问","textPreview":"形成热冷分层，支持后续专家流式访问","textChars":17,"textLines":1,"bbox":[554,168,184,12]}
-{"kind":"shape","id":"sh/sfy1w76x","slide":2,"bbox":[42,182,116,16]}
-{"kind":"textbox","id":"sh/f2p0rm58","slide":2,"text":"优化实现 1","textPreview":"优化实现 1","textChars":6,"textLines":1,"bbox":[46,184,108,12]}
-{"kind":"shape","id":"sh/ehgjyho3","slide":2,"bbox":[158,182,190,16]}
-{"kind":"textbox","id":"sh/147itwne","slide":2,"text":"显式管理专家读取路径","textPreview":"显式管理专家读取路径","textChars":10,"textLines":1,"bbox":[162,184,182,12]}
-{"kind":"shape","id":"sh/03y10r6t","slide":2,"bbox":[348,182,202,16]}
-{"kind":"textbox","id":"sh/v650fi54","slide":2,"text":"manifest + chunked pread + load path 统计","textPreview":"manifest + chunked pread + load path 统计","textChars":39,"textLines":1,"bbox":[352,184,194,12]}
-{"kind":"shape","id":"sh/ulczmxoj","slide":2,"bbox":[550,182,192,16]}
-{"kind":"textbox","id":"sh/mpgj2xwf","slide":2,"text":"可分析 cold load、带宽和 miss 成本","textPreview":"可分析 cold load、带宽和 miss 成本","textChars":25,"textLines":1,"bbox":[554,184,184,12]}
-{"kind":"shape","id":"sh/7qp0v2d0","slide":2,"bbox":[42,198,116,16]}
-{"kind":"textbox","id":"sh/8ri147el","slide":2,"text":"优化实现 2","textPreview":"优化实现 2","textChars":6,"textLines":1,"bbox":[46,200,108,12]}
-{"kind":"shape","id":"sh/9srixsv6","slide":2,"bbox":[158,198,190,16]}
-{"kind":"textbox","id":"sh/ut0j6xwr","slide":2,"text":"显式管理专家复用","textPreview":"显式管理专家复用","textChars":8,"textLines":1,"bbox":[162,200,182,12]}
-{"kind":"shape","id":"sh/vu90z2dw","slide":2,"bbox":[348,198,202,16]}
-{"kind":"textbox","id":"sh/wvi187eh","slide":2,"text":"compute-ready hot expert cache","textPreview":"compute-ready hot expert cache","textChars":30,"textLines":1,"bbox":[352,200,194,12]}
-{"kind":"shape","id":"sh/hwr21cv2","slide":2,"bbox":[550,198,192,16]}
-{"kind":"textbox","id":"sh/ih0jahwn","slide":2,"text":"减少重复解包/搬运，提升命中收益","textPreview":"减少重复解包/搬运，提升命中收益","textChars":16,"textLines":1,"bbox":[554,200,184,12]}
-{"kind":"shape","id":"sh/ji9k3md8","slide":2,"bbox":[42,214,116,16]}
-{"kind":"textbox","id":"sh/tcvm9gfa","slide":2,"text":"优化实现 3","textPreview":"优化实现 3","textChars":6,"textLines":1,"bbox":[46,216,108,12]}
-{"kind":"shape","id":"sh/sbml0byp","slide":2,"bbox":[158,214,190,16]}
-{"kind":"textbox","id":"sh/rqt476x4","slide":2,"text":"拆开 decode 热路径","textPreview":"拆开 decode 热路径","textChars":13,"textLines":1,"bbox":[162,216,182,12]}
-{"kind":"shape","id":"sh/6pk3y1gz","slide":2,"bbox":[348,214,202,16]}
-{"kind":"textbox","id":"sh/1gvmdgfm","slide":2,"text":"route / load / unpack / compute / combine 分段","textPreview":"route / load / unpack / compute / combine 分段","textChars":44,"textLines":1,"bbox":[352,216,194,12]}
-{"kind":"shape","id":"sh/gfml4vy1","slide":2,"bbox":[550,214,192,16]}
-{"kind":"textbox","id":"sh/fed4bqxg","slide":2,"text":"能直接定位阶段性瓶颈","textPreview":"能直接定位阶段性瓶颈","textChars":10,"textLines":1,"bbox":[554,216,184,12]}
-{"kind":"shape","id":"sh/ed432lgv","slide":2,"bbox":[42,230,116,16]}
-{"kind":"textbox","id":"sh/pkfmh0fi","slide":2,"text":"优化实现 4","textPreview":"优化实现 4","textChars":6,"textLines":1,"bbox":[46,232,108,12]}
-{"kind":"shape","id":"sh/oj658vyx","slide":2,"bbox":[158,230,190,16]}
-{"kind":"textbox","id":"sh/8zyx03al","slide":2,"text":"稳定 prefill/decode 执行行为","textPreview":"稳定 prefill/decode 执行行为","textChars":22,"textLines":1,"bbox":[162,232,182,12]}
-{"kind":"shape","id":"sh/907et8rq","slide":2,"bbox":[348,230,202,16]}
-{"kind":"textbox","id":"sh/mxwfytsf","slide":2,"text":"dense 常驻 UMA + experts 流式调度","textPreview":"dense 常驻 UMA + experts 流式调度","textChars":27,"textLines":1,"bbox":[352,232,194,12]}
-{"kind":"shape","id":"sh/7y5wry90","slide":2,"bbox":[550,230,192,16]}
-{"kind":"textbox","id":"sh/w3yxo3qh","slide":2,"text":"减少无关参数参与热路径，提升吞吐稳定性","textPreview":"减少无关参数参与热路径，提升吞吐稳定性","textChars":19,"textLines":1,"bbox":[554,232,184,12]}
-{"kind":"shape","id":"sh/h47yx8r2","slide":2,"bbox":[42,246,116,16]}
-{"kind":"textbox","id":"sh/u1gf2d8b","slide":2,"text":"优化实现 5","textPreview":"优化实现 5","textChars":6,"textLines":1,"bbox":[46,248,108,12]}
-{"kind":"shape","id":"sh/v2pgvy9w","slide":2,"bbox":[158,246,190,16]}
-{"kind":"textbox","id":"sh/c7uxsjad","slide":2,"text":"把实验代码变成可演进 runtime","textPreview":"把实验代码变成可演进 runtime","textChars":18,"textLines":1,"bbox":[162,248,182,12]}
-{"kind":"shape","id":"sh/x8nelory","slide":2,"bbox":[348,246,202,16]}
-{"kind":"textbox","id":"sh/fmt0rmtg","slide":2,"text":"engine / session / service 分层 + profiling hooks","textPreview":"engine / session / service 分层 + profiling hooks","textChars":47,"textLines":1,"bbox":[352,248,194,12]}
-{"kind":"shape","id":"sh/elkzyhsv","slide":2,"bbox":[550,246,192,16]}
-{"kind":"textbox","id":"sh/1obitwb6","slide":2,"text":"方便继续做性能分析、策略优化和产品集成","textPreview":"方便继续做性能分析、策略优化和产品集成","textChars":19,"textLines":1,"bbox":[554,248,184,12]}
-{"kind":"shape","id":"sh/gn2h0ral","slide":2,"bbox":[796,120,112,42]}
-{"kind":"shape","id":"sh/ryt0n2t4","slide":2,"bbox":[908,120,330,42]}
-{"kind":"textbox","id":"sh/6x0zuxcj","slide":2,"text":"Prefill","textPreview":"Prefill","textChars":7,"textLines":1,"bbox":[800,132,104,16]}
-{"kind":"textbox","id":"sh/tkbipcba","slide":2,"text":"峰值 ~396 tok/s","textPreview":"峰值 ~396 tok/s","textChars":13,"textLines":1,"bbox":[918,126,310,14]}
-{"kind":"textbox","id":"sh/sj2hw7ap","slide":2,"text":"2K ctx 实测最高约 396.4 tok/s；128K ctx 下降到约 290.6 tok/s","textPreview":"2K ctx 实测最高约 396.4 tok/s；128K ctx 下降到约 290.6 tok/s","textChars":50,"textLines":1,"bbox":[918,140,310,18]}
-{"kind":"shape","id":"sh/ju90j2t8","slide":2,"bbox":[796,174,112,42]}
-{"kind":"shape","id":"sh/it0zqxcn","slide":2,"bbox":[908,174,330,42]}
-{"kind":"textbox","id":"sh/ad4z6xkj","slide":2,"text":"Decode","textPreview":"Decode","textChars":6,"textLines":1,"bbox":[800,186,104,16]}
-{"kind":"textbox","id":"sh/ved0z214","slide":2,"text":"10.7–16.1 tok/s","textPreview":"10.7–16.1 tok/s","textChars":15,"textLines":1,"bbox":[918,180,310,14]}
-{"kind":"textbox","id":"sh/wzm18729","slide":2,"text":"128 ctx 约 16.1 tok/s；128K ctx 约 10.7 tok/s，仍明显受长上下文影响","textPreview":"128 ctx 约 16.1 tok/s；128K ctx 约 10.7 tok/s，仍明显受长上下文影响","textChars":53,"textLines":1,"bbox":[918,194,310,18]}
-{"kind":"shape","id":"sh/x0vi1cju","slide":2,"bbox":[796,228,112,42]}
-{"kind":"shape","id":"sh/m9kz2xk7","slide":2,"bbox":[908,228,330,42]}
-{"kind":"textbox","id":"sh/nat0v21s","slide":2,"text":"体验差距","textPreview":"体验差距","textChars":4,"textLines":1,"bbox":[800,240,104,16]}
-{"kind":"textbox","id":"sh/8b2h4n2d","slide":2,"text":"仍低于产品预期","textPreview":"仍低于产品预期","textChars":7,"textLines":1,"bbox":[918,234,310,14]}
-{"kind":"textbox","id":"sh/9cvixsjy","slide":2,"text":"复杂 reasoning、多轮工具、长文档任务下，用户感知瓶颈已从“能不能跑”转向“够不够快、够不够强”","textPreview":"复杂 reasoning、多轮工具、长文档任务下，用户感知瓶颈已从“能不能跑”转向“够不够快、够不够强”","textChars":52,"textLines":1,"bbox":[918,248,310,18]}
-{"kind":"shape","id":"sh/65ojeh0r","slide":2,"bbox":[796,282,442,22]}
-{"kind":"textbox","id":"sh/76x07m1c","slide":2,"text":"实测说明：后端侧已经被我们优化到“可运行且可量化”，但仍不足以单独承担完整高质量体验。","textPreview":"实测说明：后端侧已经被我们优化到“可运行且可量化”，但仍不足以单独承担完整高质量体验。","textChars":43,"textLines":1,"bbox":[806,286,422,14]}
-{"kind":"shape","id":"sh/h0z2dg3e","slide":2,"bbox":[28,348,1224,92]}
-{"kind":"shape","id":"sh/gzql4bmt","slide":2,"bbox":[28,314,1224,34]}
-{"kind":"textbox","id":"sh/fyhkb6l8","slide":2,"text":"代表性实测数据：短上下文可用，长上下文与复杂任务仍明显掉体验","textPreview":"代表性实测数据：短上下文可用，长上下文与复杂任务仍明显掉体验","textChars":30,"textLines":1,"bbox":[42,321,1196,20]}
-{"kind":"shape","id":"sh/ux832l4n","slide":2,"bbox":[42,362,132,28]}
-{"kind":"textbox","id":"sh/twz29g32","slide":2,"text":"Context","textPreview":"Context","textChars":7,"textLines":1,"bbox":[46,369,124,14]}
-{"kind":"shape","id":"sh/svql0bmh","slide":2,"bbox":[174,362,144,28]}
-{"kind":"textbox","id":"sh/7uxk76lc","slide":2,"text":"Prefill TPS","textPreview":"Prefill TPS","textChars":11,"textLines":1,"bbox":[178,369,136,14]}
-{"kind":"shape","id":"sh/6to3y14r","slide":2,"bbox":[318,362,144,28]}
-{"kind":"textbox","id":"sh/dsjml03m","slide":2,"text":"Decode TPS","textPreview":"Decode TPS","textChars":10,"textLines":1,"bbox":[322,369,136,14]}
-{"kind":"shape","id":"sh/cralcv21","slide":2,"bbox":[462,362,248,28]}
-{"kind":"textbox","id":"sh/p8ve9sre","slide":2,"text":"端侧表现","textPreview":"端侧表现","textChars":4,"textLines":1,"bbox":[466,369,240,14]}
-{"kind":"shape","id":"sh/o7mdgna9","slide":2,"bbox":[710,362,256,28]}
-{"kind":"textbox","id":"sh/36dw7i9o","slide":2,"text":"用户感知","textPreview":"用户感知","textChars":4,"textLines":1,"bbox":[714,369,248,14]}
-{"kind":"shape","id":"sh/254veds3","slide":2,"bbox":[966,362,258,28]}
-{"kind":"textbox","id":"sh/14ve58ri","slide":2,"text":"结论","textPreview":"结论","textChars":2,"textLines":1,"bbox":[970,369,250,14]}
-{"kind":"shape","id":"sh/g3mdc3ax","slide":2,"bbox":[42,390,132,16]}
-{"kind":"textbox","id":"sh/f2dw3itc","slide":2,"text":"128","textPreview":"128","textChars":3,"textLines":1,"bbox":[46,392,124,12]}
-{"kind":"shape","id":"sh/e1kvadsr","slide":2,"bbox":[174,390,144,16]}
-{"kind":"textbox","id":"sh/t0be18bm","slide":2,"text":"148.98","textPreview":"148.98","textChars":6,"textLines":1,"bbox":[178,392,136,12]}
-{"kind":"shape","id":"sh/sf2d83a1","slide":2,"bbox":[318,390,144,16]}
-{"kind":"textbox","id":"sh/il0b298j","slide":2,"text":"16.12","textPreview":"16.12","textChars":5,"textLines":1,"bbox":[322,392,136,12]}
-{"kind":"shape","id":"sh/j69sbep4","slide":2,"bbox":[462,390,248,16]}
-{"kind":"textbox","id":"sh/47it4jqp","slide":2,"text":"首响可接受，但 prefill 还未进入甜点区","textPreview":"首响可接受，但 prefill 还未进入甜点区","textChars":23,"textLines":1,"bbox":[466,392,240,12]}
-{"kind":"shape","id":"sh/58rud47a","slide":2,"bbox":[710,390,256,16]}
-{"kind":"textbox","id":"sh/uhgbyp8n","slide":2,"text":"轻问答可用，回复速度一般","textPreview":"轻问答可用，回复速度一般","textChars":12,"textLines":1,"bbox":[714,392,248,12]}
-{"kind":"shape","id":"sh/vi9s7u98","slide":2,"bbox":[966,390,258,16]}
-{"kind":"textbox","id":"sh/wjit0zqt","slide":2,"text":"证明本地跑通了，但还不是高质量体验","textPreview":"证明本地跑通了，但还不是高质量体验","textChars":17,"textLines":1,"bbox":[970,392,250,12]}
-{"kind":"shape","id":"sh/hkra94re","slide":2,"bbox":[42,406,132,16]}
-{"kind":"textbox","id":"sh/mdgbup8b","slide":2,"text":"2,048","textPreview":"2,048","textChars":5,"textLines":1,"bbox":[46,408,124,12]}
-{"kind":"shape","id":"sh/7eps3u9w","slide":2,"bbox":[174,406,144,16]}
-{"kind":"textbox","id":"sh/bil8bqpo","slide":2,"text":"396.40","textPreview":"396.40","textChars":6,"textLines":1,"bbox":[178,408,136,12]}
-{"kind":"shape","id":"sh/ahc72lo3","slide":2,"bbox":[318,406,144,16]}
-{"kind":"textbox","id":"sh/xknqdg7u","slide":2,"text":"14.58","textPreview":"14.58","textChars":5,"textLines":1,"bbox":[322,408,136,12]}
-{"kind":"shape","id":"sh/cjep4v69","slide":2,"bbox":[462,406,248,16]}
-{"kind":"textbox","id":"sh/zm58fqp0","slide":2,"text":"当前 GB10 端侧最优工作点之一","textPreview":"当前 GB10 端侧最优工作点之一","textChars":17,"textLines":1,"bbox":[466,408,240,12]}
-{"kind":"shape","id":"sh/ylwr6lof","slide":2,"bbox":[710,406,256,16]}
-{"kind":"textbox","id":"sh/lonqh0n6","slide":2,"text":"常见问答可运行，但复杂任务仍偏慢","textPreview":"常见问答可运行，但复杂任务仍偏慢","textChars":16,"textLines":1,"bbox":[714,408,248,12]}
-{"kind":"shape","id":"sh/kne98v6l","slide":2,"bbox":[966,406,258,16]}
-{"kind":"textbox","id":"sh/fq1836pg","slide":2,"text":"后端优化已基本释放短上下文硬件潜力","textPreview":"后端优化已基本释放短上下文硬件潜力","textChars":17,"textLines":1,"bbox":[970,408,250,12]}
-{"kind":"shape","id":"sh/eps7u1ob","slide":2,"bbox":[42,422,132,16]}
-{"kind":"textbox","id":"sh/4vq547mt","slide":2,"text":"131,072","textPreview":"131,072","textChars":7,"textLines":1,"bbox":[46,424,124,12]}
-{"kind":"shape","id":"sh/5wzmdcne","slide":2,"bbox":[174,422,144,16]}
-{"kind":"textbox","id":"sh/it8n2x43","slide":2,"text":"290.63","textPreview":"290.63","textChars":6,"textLines":1,"bbox":[178,424,136,12]}
-{"kind":"shape","id":"sh/juh4b258","slide":2,"bbox":[318,422,144,16]}
-{"kind":"textbox","id":"sh/wr650nmx","slide":2,"text":"10.73","textPreview":"10.73","textChars":5,"textLines":1,"bbox":[322,424,136,12]}
-{"kind":"shape","id":"sh/hsfm9sni","slide":2,"bbox":[462,422,248,16]}
-{"kind":"textbox","id":"sh/u5onyd4r","slide":2,"text":"长上下文下 prefill / decode 同时退化","textPreview":"长上下文下 prefill / decode 同时退化","textChars":27,"textLines":1,"bbox":[466,424,240,12]}
-{"kind":"shape","id":"sh/v6x47i5c","slide":2,"bbox":[710,422,256,16]}
-{"kind":"textbox","id":"sh/0na5crm1","slide":2,"text":"长文档与复杂任务等待感明显","textPreview":"长文档与复杂任务等待感明显","textChars":13,"textLines":1,"bbox":[714,424,248,12]}
-{"kind":"shape","id":"sh/1oj6lwnm","slide":2,"bbox":[966,422,258,16]}
-{"kind":"textbox","id":"sh/dwbahkz2","slide":2,"text":"真正缺的是模型能力与 tail latency，不只是后端实现","textPreview":"真正缺的是模型能力与 tail latency，不只是后端实现","textChars":31,"textLines":1,"bbox":[970,424,250,12]}
-{"kind":"shape","id":"sh/cvitofyh","slide":2,"bbox":[28,490,392,90]}
-{"kind":"shape","id":"sh/bu9sfahw","slide":2,"bbox":[28,456,392,34]}
-{"kind":"textbox","id":"sh/qt0bm5gb","slide":2,"text":"离用户体验还差什么","textPreview":"离用户体验还差什么","textChars":9,"textLines":1,"bbox":[42,463,364,20]}
-{"kind":"shape","id":"sh/l0bul4zy","slide":2,"bbox":[444,490,392,90]}
-{"kind":"shape","id":"sh/0z2tszyd","slide":2,"bbox":[444,456,392,34]}
-{"kind":"textbox","id":"sh/zytcjuhs","slide":2,"text":"为什么必须补齐云端模型","textPreview":"为什么必须补齐云端模型","textChars":11,"textLines":1,"bbox":[458,463,364,20]}
-{"kind":"shape","id":"sh/yxkbqpg7","slide":2,"bbox":[860,490,392,90]}
-{"kind":"shape","id":"sh/9ovup4zu","slide":2,"bbox":[860,456,392,34]}
-{"kind":"textbox","id":"sh/8nmtwzyp","slide":2,"text":"推荐的产品形态","textPreview":"推荐的产品形态","textChars":7,"textLines":1,"bbox":[874,463,364,20]}
-{"kind":"textbox","id":"sh/69w7a1wr","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,504,16,18.3]}
-{"kind":"textbox","id":"sh/ra58j6xc","slide":2,"text":"复杂 reasoning 依赖更强模型能力，而不是仅仅更好的 cache policy。","textPreview":"复杂 reasoning 依赖更强模型能力，而不是仅仅更好的 cache policy。","textChars":44,"textLines":1,"bbox":[60,504,348,20.3]}
-{"kind":"textbox","id":"sh/sbe9cbex","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,530,16,18.3]}
-{"kind":"textbox","id":"sh/twnqlgfi","slide":2,"text":"长上下文、多工具、多文档任务下，tail latency 与完成质量仍落后于用户预期。","textPreview":"长上下文、多工具、多文档任务下，tail latency 与完成质量仍落后于用户预期。","textChars":43,"textLines":1,"bbox":[60,530,348,20.3]}
-{"kind":"textbox","id":"sh/exgrelw3","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,504,16,18.3]}
-{"kind":"textbox","id":"sh/fyp8n6xo","slide":2,"text":"端侧负责低延迟、隐私和会话连续性。","textPreview":"端侧负责低延迟、隐私和会话连续性。","textChars":17,"textLines":1,"bbox":[476,504,348,20.3]}
-{"kind":"textbox","id":"sh/gzy9gbe9","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,530,16,18.3]}
-{"kind":"textbox","id":"sh/107qpgfu","slide":2,"text":"云端负责高质量 reasoning、长上下文和复杂工具链。","textPreview":"云端负责高质量 reasoning、长上下文和复杂工具链。","textChars":29,"textLines":1,"bbox":[476,530,348,20.3]}
-{"kind":"textbox","id":"sh/21grilwz","slide":2,"text":"最合理的形态不是“端侧替代云端”，而是 device-first + cloud-assisted：本地给首响与连续性，云端补能力上限。","textPreview":"最合理的形态不是“端侧替代云端”，而是 device-first + cloud-assisted：本地给首响与连续性，云端补能力上限。","textChars":68,"textLines":1,"bbox":[876,504,360,44]}
-{"kind":"shape","id":"sh/32p8rqxk","slide":2,"bbox":[28,582,1224,72]}
-{"kind":"textbox","id":"sh/z698fqts","slide":2,"text":"核心结论：我们已经把 GB10 端侧后端优化到“能跑、能测、能迭代”的阶段，实测 prefill 峰值约 396 tok/s、decode 约 10.7–16.1 tok/s；但真正限制用户体验的，已经不只是后端实现，而是模型能力、长上下文质量和复杂任务 tail latency。因此下一步必须用云端模型补齐体验上限。","textPreview":"核心结论：我们已经把 GB10 端侧后端优化到“能跑、能测、能迭代”的阶段，实测 prefill 峰值约 396 tok/s、decode 约 10.7–16.1 tok/s；但真正限制用户体验的，已经不只是后端实现，而是模型能力、长上下文质量和复杂任务 tail late...","textChars":160,"textLines":1,"bbox":[44,596,1188,22]}
-{"kind":"shape","id":"sh/y5076lc7","slide":2,"bbox":[28,670,1224,34]}
-{"kind":"textbox","id":"sh/l8rqh0by","slide":2,"text":"Takeaway：GB10 端侧优化解决的是“本地可运行性”，云端模型补齐的是“高质量体验上限”；后续重点应转向端云协同，而不是继续单点堆本地后端优化。","textPreview":"Takeaway：GB10 端侧优化解决的是“本地可运行性”，云端模型补齐的是“高质量体验上限”；后续重点应转向端云协同，而不是继续单点堆本地后端优化。","textChars":76,"textLines":1,"bbox":[42,677,1192,18]}
-{"kind":"notes","id":"nt/hhladr","slide":2,"text":""}
+{"kind":"deck","id":"pr/bjqm71","name":"Deck"}
+{"kind":"layout","layoutId":"d5c21392-5c03-40a8-a890-e6b2c91cc04b","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"b32d294b-6195-463b-9ada-616f6d402f59","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/br63w1","slide":1,"title":"从 Metal 到 CUDA：为什么必须重做 DS4 端侧运行时","textShapes":59}
+{"kind":"textbox","id":"sh/f6hwz614","slide":1,"text":"从 Metal 到 CUDA：为什么必须重做 DS4 端侧运行时","textPreview":"从 Metal 到 CUDA：为什么必须重做 DS4 端侧运行时","textChars":32,"textLines":1,"bbox":[28,14,980,42]}
+{"kind":"shape","id":"sh/g7qx8b29","slide":1,"bbox":[28,55,1224,3]}
+{"kind":"shape","id":"sh/1sze1gju","slide":1,"bbox":[28,104,720,270]}
+{"kind":"shape","id":"sh/61ov21k7","slide":1,"bbox":[28,70,720,34]}
+{"kind":"textbox","id":"sh/r2xwv61s","slide":1,"text":"迁移必要性：Metal 路线无法直接复用于 GB10","textPreview":"迁移必要性：Metal 路线无法直接复用于 GB10","textChars":26,"textLines":1,"bbox":[42,77,692,20]}
+{"kind":"shape","id":"sh/s36d4b2d","slide":1,"bbox":[772,104,508,270]}
+{"kind":"shape","id":"sh/t4fexgjy","slide":1,"bbox":[772,70,508,34]}
+{"kind":"textbox","id":"sh/ix4vyhkb","slide":1,"text":"我们为什么选择 CUDA 原生重构","textPreview":"我们为什么选择 CUDA 原生重构","textChars":17,"textLines":1,"bbox":[786,77,480,20]}
+{"kind":"shape","id":"sh/jyxwrmlw","slide":1,"bbox":[42,118,108,36]}
+{"kind":"shape","id":"sh/ri10r2p4","slide":1,"bbox":[150,118,584,36]}
+{"kind":"textbox","id":"sh/6x8zix8j","slide":1,"text":"平台绑定","textPreview":"平台绑定","textChars":4,"textLines":1,"bbox":[46,128,100,16]}
+{"kind":"textbox","id":"sh/tkjits7a","slide":1,"text":"DS4 原始路线围绕 Apple unified memory + Metal kernel 组织，底层算子和数据流天然贴合苹果执行栈。","textPreview":"DS4 原始路线围绕 Apple unified memory + Metal kernel 组织，底层算子和数据流天然贴合苹果执行栈。","textChars":68,"textLines":1,"bbox":[160,125,564,22]}
+{"kind":"shape","id":"sh/sjahknqp","slide":1,"bbox":[42,160,108,36]}
+{"kind":"shape","id":"sh/fm10v2p0","slide":1,"bbox":[150,160,584,36]}
+{"kind":"textbox","id":"sh/elsjmx8v","slide":1,"text":"闭源限制","textPreview":"闭源限制","textChars":4,"textLines":1,"bbox":[46,170,100,16]}
+{"kind":"textbox","id":"sh/1ojixc76","slide":1,"text":"Metal / MPS / Apple 系统栈的大量关键行为是黑盒，很多性能行为可观察但不可改写，无法作为 GB10 的工程基座。","textPreview":"Metal / MPS / Apple 系统栈的大量关键行为是黑盒，很多性能行为可观察但不可改写，无法作为 GB10 的工程基座。","textChars":65,"textLines":1,"bbox":[160,167,564,22]}
+{"kind":"shape","id":"sh/gna1o7ql","slide":1,"bbox":[42,202,108,36]}
+{"kind":"shape","id":"sh/vqx0jipw","slide":1,"bbox":[150,202,584,36]}
+{"kind":"textbox","id":"sh/upozad8b","slide":1,"text":"框架限制","textPreview":"框架限制","textChars":4,"textLines":1,"bbox":[46,212,100,16]}
+{"kind":"textbox","id":"sh/yxgbe5wb","slide":1,"text":"原实现部分生命周期深度绑定上层框架与参数树；底层 runtime、page-cache 路径、内存策略不能按 GB10 目标任意修改。","textPreview":"原实现部分生命周期深度绑定上层框架与参数树；底层 runtime、page-cache 路径、内存策略不能按 GB10 目标任意修改。","textChars":67,"textLines":1,"bbox":[160,209,564,22]}
+{"kind":"shape","id":"sh/zypc7adw","slide":1,"bbox":[42,244,108,36]}
+{"kind":"shape","id":"sh/kjytgfeh","slide":1,"bbox":[150,244,584,36]}
+{"kind":"textbox","id":"sh/lk7u9kvm","slide":1,"text":"硬件差异","textPreview":"硬件差异","textChars":4,"textLines":1,"bbox":[46,254,100,16]}
+{"kind":"textbox","id":"sh/atwba5wz","slide":1,"text":"GB10 面对的是 UMA + CUDA + SSD expert store，需要显式处理 SSD→DDR→GPU copy/compute overlap，Metal 方案没有现成答案。","textPreview":"GB10 面对的是 UMA + CUDA + SSD expert store，需要显式处理 SSD→DDR→GPU copy/compute overlap，Metal 方案没有现成答案。","textChars":95,"textLines":1,"bbox":[160,251,564,22]}
+{"kind":"shape","id":"sh/bu5c3adk","slide":1,"bbox":[42,286,108,36]}
+{"kind":"shape","id":"sh/cvytcve5","slide":1,"bbox":[150,286,584,36]}
+{"kind":"textbox","id":"sh/xw7u50vq","slide":1,"text":"产品要求","textPreview":"产品要求","textChars":4,"textLines":1,"bbox":[46,296,100,16]}
+{"kind":"textbox","id":"sh/2pwb6lw3","slide":1,"text":"我们需要可控的 profile、cache policy、服务化接口和后续在线部署能力，这要求运行时必须完全可改、可测、可演进。","textPreview":"我们需要可控的 profile、cache policy、服务化接口和后续在线部署能力，这要求运行时必须完全可改、可测、可演进。","textChars":64,"textLines":1,"bbox":[160,293,564,22]}
+{"kind":"textbox","id":"sh/nq5czqdo","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[788,118,16,19.5]}
+{"kind":"textbox","id":"sh/5kbe5of6","slide":1,"text":"不能只做“Metal kernel → CUDA kernel”的语法级替换；真正要迁移的是 streamed-MoE 的控制面思想。","textPreview":"不能只做“Metal kernel → CUDA kernel”的语法级替换；真正要迁移的是 streamed-MoE 的控制面思想。","textChars":67,"textLines":1,"bbox":[804,118,460,21.5]}
+{"kind":"textbox","id":"sh/4j2xcjyl","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[788,172,16,19.5]}
+{"kind":"textbox","id":"sh/3itw3ex0","slide":1,"text":"必须把冷数据读取、expert cache、decode scheduler、service interface 全部从苹果黑盒依赖中解耦出来。","textPreview":"必须把冷数据读取、expert cache、decode scheduler、service interface 全部从苹果黑盒依赖中解耦出来。","textChars":72,"textLines":1,"bbox":[804,172,460,21.5]}
+{"kind":"textbox","id":"sh/ihkfatgf","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[788,226,16,19.5]}
+{"kind":"textbox","id":"sh/hgbe1ofu","slide":1,"text":"只有这样，后续才能继续做带宽建模、命中率分析、Nsight/profile、在线服务化与多模型扩展。","textPreview":"只有这样，后续才能继续做带宽建模、命中率分析、Nsight/profile、在线服务化与多模型扩展。","textChars":50,"textLines":1,"bbox":[804,226,460,21.5]}
+{"kind":"shape","id":"sh/wf2x8jyp","slide":1,"bbox":[786,286,480,56]}
+{"kind":"textbox","id":"sh/vetwzex4","slide":1,"text":"结论：迁移不是为了“换个后端”，而是为了拿回底层可控性，建立能面向 GB10 长期演进的运行时底座。","textPreview":"结论：迁移不是为了“换个后端”，而是为了拿回底层可控性，建立能面向 GB10 长期演进的运行时底座。","textChars":50,"textLines":1,"bbox":[796,298,460,30]}
+{"kind":"shape","id":"sh/ud0f69gj","slide":1,"bbox":[28,392,1224,146]}
+{"kind":"shape","id":"sh/9srex4fy","slide":1,"bbox":[28,392,1224,34]}
+{"kind":"textbox","id":"sh/8rix4zyd","slide":1,"text":"迁移映射：从 Apple/Metal 约束，转换到 GB10/CUDA 可控运行时","textPreview":"迁移映射：从 Apple/Metal 约束，转换到 GB10/CUDA 可控运行时","textChars":41,"textLines":1,"bbox":[42,399,1180,20]}
+{"kind":"shape","id":"sh/ojqxojad","slide":1,"bbox":[28,426,176,30]}
+{"kind":"textbox","id":"sh/9kjehoby","slide":1,"text":"维度","textPreview":"维度","textChars":2,"textLines":1,"bbox":[32,433,168,16]}
+{"kind":"shape","id":"sh/mh8fm9s7","slide":1,"bbox":[204,426,260,30]}
+{"kind":"textbox","id":"sh/nihwfets","slide":1,"text":"Apple / Metal 原始状态","textPreview":"Apple / Metal 原始状态","textChars":18,"textLines":1,"bbox":[208,433,252,16]}
+{"kind":"shape","id":"sh/w7axsja9","slide":1,"bbox":[464,426,260,30]}
+{"kind":"textbox","id":"sh/x8jelobu","slide":1,"text":"为什么不够","textPreview":"为什么不够","textChars":5,"textLines":1,"bbox":[468,433,252,16]}
+{"kind":"shape","id":"sh/a5sfqts3","slide":1,"bbox":[724,426,252,30]}
+{"kind":"textbox","id":"sh/b61wjeto","slide":1,"text":"GB10 / CUDA 改造","textPreview":"GB10 / CUDA 改造","textChars":14,"textLines":1,"bbox":[728,433,244,16]}
+{"kind":"shape","id":"sh/cb6dgzu5","slide":1,"bbox":[976,426,276,30]}
+{"kind":"textbox","id":"sh/dcze94bq","slide":1,"text":"结果","textPreview":"结果","textChars":2,"textLines":1,"bbox":[980,433,268,16]}
+{"kind":"shape","id":"sh/fip8bmh4","slide":1,"bbox":[28,456,176,18]}
+{"kind":"textbox","id":"sh/ehgr21gz","slide":1,"text":"执行栈","textPreview":"执行栈","textChars":3,"textLines":1,"bbox":[33,458,166,13]}
+{"kind":"shape","id":"sh/1k7qdwza","slide":1,"bbox":[204,456,260,18]}
+{"kind":"textbox","id":"sh/gjy94ryp","slide":1,"text":"Metal / MPS / Apple runtime","textPreview":"Metal / MPS / Apple runtime","textChars":27,"textLines":1,"bbox":[209,458,250,13]}
+{"kind":"shape","id":"sh/re587mh8","slide":1,"bbox":[464,456,260,18]}
+{"kind":"textbox","id":"sh/6dw7yhgn","slide":1,"text":"底层黑盒，无法按 GB10 目标重排数据流","textPreview":"底层黑盒，无法按 GB10 目标重排数据流","textChars":21,"textLines":1,"bbox":[469,458,250,13]}
+{"kind":"shape","id":"sh/tg7q9wze","slide":1,"bbox":[724,456,252,18]}
+{"kind":"textbox","id":"sh/sfep0ryt","slide":1,"text":"CUDA / Tensor Core kernel","textPreview":"CUDA / Tensor Core kernel","textChars":25,"textLines":1,"bbox":[729,458,242,13]}
+{"kind":"shape","id":"sh/ja5832hc","slide":1,"bbox":[976,456,276,18]}
+{"kind":"textbox","id":"sh/ipw7uh0r","slide":1,"text":"获得 kernel、copy、调度全链路可控性","textPreview":"获得 kernel、copy、调度全链路可控性","textChars":23,"textLines":1,"bbox":[981,458,266,13]}
+{"kind":"shape","id":"sh/mlcrmxkj","slide":1,"bbox":[28,474,176,18]}
+{"kind":"textbox","id":"sh/7ml8f214","slide":1,"text":"参数组织","textPreview":"参数组织","textChars":4,"textLines":1,"bbox":[33,476,166,13]}
+{"kind":"shape","id":"sh/8nu9o72p","slide":1,"bbox":[204,474,260,18]}
+{"kind":"textbox","id":"sh/983ahcja","slide":1,"text":"框架参数树强耦合","textPreview":"框架参数树强耦合","textChars":8,"textLines":1,"bbox":[209,476,250,13]}
+{"kind":"shape","id":"sh/u9wrqhkf","slide":1,"bbox":[464,474,260,18]}
+{"kind":"textbox","id":"sh/va5sjm10","slide":1,"text":"无法显式拆开 dense resident 与 expert store","textPreview":"无法显式拆开 dense resident 与 expert store","textChars":36,"textLines":1,"bbox":[469,476,250,13]}
+{"kind":"shape","id":"sh/wbe9sr2l","slide":1,"bbox":[724,474,252,18]}
+{"kind":"textbox","id":"sh/hcnalwj6","slide":1,"text":"dense resident + manifest expert store","textPreview":"dense resident + manifest expert store","textChars":38,"textLines":1,"bbox":[729,476,242,13]}
+{"kind":"shape","id":"sh/idwruhkr","slide":1,"bbox":[976,474,276,18]}
+{"kind":"textbox","id":"sh/je5snm1c","slide":1,"text":"支持热冷分层与可测 miss 成本","textPreview":"支持热冷分层与可测 miss 成本","textChars":17,"textLines":1,"bbox":[981,476,266,13]}
+{"kind":"shape","id":"sh/t8rudg3e","slide":1,"bbox":[28,492,176,18]}
+{"kind":"textbox","id":"sh/s7ytkvmt","slide":1,"text":"冷数据读取","textPreview":"冷数据读取","textChars":5,"textLines":1,"bbox":[33,494,166,13]}
+{"kind":"shape","id":"sh/r6pcbql8","slide":1,"bbox":[204,492,260,18]}
+{"kind":"textbox","id":"sh/65gbil4n","slide":1,"text":"page-cache 风格读取","textPreview":"page-cache 风格读取","textChars":15,"textLines":1,"bbox":[209,494,250,13]}
+{"kind":"shape","id":"sh/1cruh03a","slide":1,"bbox":[464,492,260,18]}
+{"kind":"textbox","id":"sh/gbidovm5","slide":1,"text":"难以准确控制 load path 和预取策略","textPreview":"难以准确控制 load path 和预取策略","textChars":22,"textLines":1,"bbox":[469,494,250,13]}
+{"kind":"shape","id":"sh/fa9cfqlk","slide":1,"bbox":[724,492,252,18]}
+{"kind":"textbox","id":"sh/e90bml4z","slide":1,"text":"chunked pread + explicit cache","textPreview":"chunked pread + explicit cache","textChars":30,"textLines":1,"bbox":[729,494,242,13]}
+{"kind":"shape","id":"sh/p0bul03m","slide":1,"bbox":[976,492,276,18]}
+{"kind":"textbox","id":"sh/ozidsfm1","slide":1,"text":"可做带宽建模和命中率优化","textPreview":"可做带宽建模和命中率优化","textChars":12,"textLines":1,"bbox":[981,494,266,13]}
+{"kind":"shape","id":"sh/w3y58n2d","slide":1,"bbox":[28,510,176,18]}
+{"kind":"textbox","id":"sh/x47mhs3y","slide":1,"text":"运行时接口","textPreview":"运行时接口","textChars":5,"textLines":1,"bbox":[33,512,166,13]}
+{"kind":"shape","id":"sh/a1wn6dk7","slide":1,"bbox":[204,510,260,18]}
+{"kind":"textbox","id":"sh/v2p4fils","slide":1,"text":"更偏实验性实现","textPreview":"更偏实验性实现","textChars":7,"textLines":1,"bbox":[209,512,250,13]}
+{"kind":"shape","id":"sh/oze5432h","slide":1,"bbox":[464,510,260,18]}
+{"kind":"textbox","id":"sh/90nmd832","slide":1,"text":"难服务化、难长期维护","textPreview":"难服务化、难长期维护","textChars":10,"textLines":1,"bbox":[469,512,250,13]}
+{"kind":"shape","id":"sh/mxwn2tkb","slide":1,"bbox":[724,510,252,18]}
+{"kind":"textbox","id":"sh/ny54bylw","slide":1,"text":"engine / session / service","textPreview":"engine / session / service","textChars":26,"textLines":1,"bbox":[729,512,242,13]}
+{"kind":"shape","id":"sh/0bel0325","slide":1,"bbox":[976,510,276,18]}
+{"kind":"textbox","id":"sh/1cnm983q","slide":1,"text":"形成可部署、可扩展的产品底座","textPreview":"形成可部署、可扩展的产品底座","textChars":14,"textLines":1,"bbox":[981,512,266,13]}
+{"kind":"shape","id":"sh/36lojy5s","slide":1,"bbox":[28,588,392,82]}
+{"kind":"shape","id":"sh/25cnqto7","slide":1,"bbox":[28,554,392,34]}
+{"kind":"textbox","id":"sh/p836loni","slide":1,"text":"闭源与框架约束","textPreview":"闭源与框架约束","textChars":7,"textLines":1,"bbox":[42,561,364,20]}
+{"kind":"shape","id":"sh/47u5s36x","slide":1,"bbox":[444,588,392,82]}
+{"kind":"shape","id":"sh/ra5ony5o","slide":1,"bbox":[444,554,392,34]}
+{"kind":"textbox","id":"sh/q9cnuto3","slide":1,"text":"我们已经完成的重构","textPreview":"我们已经完成的重构","textChars":9,"textLines":1,"bbox":[458,561,364,20]}
+{"kind":"shape","id":"sh/dwn6p8nu","slide":1,"bbox":[860,588,392,82]}
+{"kind":"shape","id":"sh/cbe5g369","slide":1,"bbox":[860,554,392,34]}
+{"kind":"textbox","id":"sh/zy5ori5k","slide":1,"text":"本页结论","textPreview":"本页结论","textChars":4,"textLines":1,"bbox":[874,561,364,20]}
+{"kind":"textbox","id":"sh/exwnidof","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,602,16,18.3]}
+{"kind":"textbox","id":"sh/7qx0juls","slide":1,"text":"原始 Metal 路线很多关键能力可观察但不可改。","textPreview":"原始 Metal 路线很多关键能力可观察但不可改。","textChars":25,"textLines":1,"bbox":[60,602,348,20.3]}
+{"kind":"textbox","id":"sh/6pojapkn","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,628,16,18.3]}
+{"kind":"textbox","id":"sh/tsfil43y","slide":1,"text":"底层框架和系统栈不是我们可长期依赖的可控资产。","textPreview":"底层框架和系统栈不是我们可长期依赖的可控资产。","textChars":23,"textLines":1,"bbox":[60,628,348,20.3]}
+{"kind":"textbox","id":"sh/sr61cz2d","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,602,16,18.3]}
+{"kind":"textbox","id":"sh/jmd0falw","slide":1,"text":"保留 streamed-MoE 控制面思想。","textPreview":"保留 streamed-MoE 控制面思想。","textChars":22,"textLines":1,"bbox":[476,602,348,20.3]}
+{"kind":"textbox","id":"sh/il4j6pkb","slide":1,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,628,16,18.3]}
+{"kind":"textbox","id":"sh/5ofihk32","slide":1,"text":"重写 dense resident / expert store / hot cache / scheduler。","textPreview":"重写 dense resident / expert store / hot cache / scheduler。","textChars":57,"textLines":1,"bbox":[476,628,348,20.3]}
+{"kind":"textbox","id":"sh/knm18f2h","slide":1,"text":"我们迁移的不是 Metal 本身，而是 DS4 的思路；我们重做的是底层 runtime，以便在 GB10 上真正可控、可调、可产品化。","textPreview":"我们迁移的不是 Metal 本身，而是 DS4 的思路；我们重做的是底层 runtime，以便在 GB10 上真正可控、可调、可产品化。","textChars":68,"textLines":1,"bbox":[876,604,360,40]}
+{"kind":"shape","id":"sh/vyd0balk","slide":1,"bbox":[28,682,1224,24]}
+{"kind":"textbox","id":"sh/ax4z25kf","slide":1,"text":"Takeaway：从 Metal 转向 CUDA 的根本原因，是 Apple 路线闭源、黑盒、难改，无法支撑 GB10 所需的底层可控性与后续产品化演进。","textPreview":"Takeaway：从 Metal 转向 CUDA 的根本原因，是 Apple 路线闭源、黑盒、难改，无法支撑 GB10 所需的底层可控性与后续产品化演进。","textChars":77,"textLines":1,"bbox":[42,686,1192,16]}
+{"kind":"notes","id":"nt/br63w1","slide":1,"text":""}
+{"kind":"slide","id":"sl/21nvb1","slide":2,"title":"GB10 端侧优化与体验差距：为什么还需要云端模型补齐","textShapes":84}
+{"kind":"textbox","id":"sh/qt8re50v","slide":2,"text":"GB10 端侧优化与体验差距：为什么还需要云端模型补齐","textPreview":"GB10 端侧优化与体验差距：为什么还需要云端模型补齐","textChars":27,"textLines":1,"bbox":[28,14,990,42]}
+{"kind":"shape","id":"sh/dgzap0zm","slide":2,"bbox":[28,55,1224,3]}
+{"kind":"shape","id":"sh/sfq9gvi1","slide":2,"bbox":[28,106,730,190]}
+{"kind":"shape","id":"sh/3qx8jqhk","slide":2,"bbox":[28,72,730,34]}
+{"kind":"textbox","id":"sh/iporal0z","slide":2,"text":"跑通 FlashMoE 版本 + 软件深度优化性能的关键实现","textPreview":"跑通 FlashMoE 版本 + 软件深度优化性能的关键实现","textChars":30,"textLines":1,"bbox":[42,79,702,20]}
+{"kind":"shape","id":"sh/5sfql0za","slide":2,"bbox":[782,106,470,190]}
+{"kind":"shape","id":"sh/4r69cvi5","slide":2,"bbox":[782,72,470,34]}
+{"kind":"textbox","id":"sh/vmx8f6h8","slide":2,"text":"实测性能与用户体验差距","textPreview":"实测性能与用户体验差距","textChars":11,"textLines":1,"bbox":[796,79,442,20]}
+{"kind":"shape","id":"sh/ul4r6l0n","slide":2,"bbox":[42,120,116,30]}
+{"kind":"textbox","id":"sh/ovapovml","slide":2,"text":"类别","textPreview":"类别","textChars":2,"textLines":1,"bbox":[46,127,108,16]}
+{"kind":"shape","id":"sh/9wj6x036","slide":2,"bbox":[158,120,190,30]}
+{"kind":"textbox","id":"sh/2t87ml4v","slide":2,"text":"关键修改点","textPreview":"关键修改点","textChars":5,"textLines":1,"bbox":[162,127,182,16]}
+{"kind":"shape","id":"sh/nuhovql0","slide":2,"bbox":[348,120,202,30]}
+{"kind":"textbox","id":"sh/0rqpkbmp","slide":2,"text":"深度优化实现","textPreview":"深度优化实现","textChars":6,"textLines":1,"bbox":[352,127,194,16]}
+{"kind":"shape","id":"sh/1sz6tg3a","slide":2,"bbox":[550,120,192,30]}
+{"kind":"textbox","id":"sh/ep87i14j","slide":2,"text":"价值","textPreview":"价值","textChars":2,"textLines":1,"bbox":[554,127,184,16]}
+{"kind":"shape","id":"sh/fqhor6l4","slide":2,"bbox":[42,150,116,16]}
+{"kind":"textbox","id":"sh/knupwfmt","slide":2,"text":"跑通修改 1","textPreview":"跑通修改 1","textChars":6,"textLines":1,"bbox":[46,152,108,12]}
+{"kind":"shape","id":"sh/lo3q5k3e","slide":2,"bbox":[158,150,190,16]}
+{"kind":"textbox","id":"sh/t4z690vi","slide":2,"text":"把 DS4 2bit 路线改成可运行 FlashMoE 版本","textPreview":"把 DS4 2bit 路线改成可运行 FlashMoE 版本","textChars":30,"textLines":1,"bbox":[162,152,182,12]}
+{"kind":"shape","id":"sh/s3qpgfex","slide":2,"bbox":[348,150,202,16]}
+{"kind":"textbox","id":"sh/72ho7adc","slide":2,"text":"重建模型加载、权重组织与执行入口","textPreview":"重建模型加载、权重组织与执行入口","textChars":16,"textLines":1,"bbox":[352,152,194,12]}
+{"kind":"shape","id":"sh/6ho7e5w7","slide":2,"bbox":[550,150,192,16]}
+{"kind":"textbox","id":"sh/5gf650vm","slide":2,"text":"先解决“能不能在 GB10 上跑起来”","textPreview":"先解决“能不能在 GB10 上跑起来”","textChars":19,"textLines":1,"bbox":[554,152,184,12]}
+{"kind":"shape","id":"sh/kf6pcve1","slide":2,"bbox":[42,166,116,16]}
+{"kind":"textbox","id":"sh/jexo3qdg","slide":2,"text":"跑通修改 2","textPreview":"跑通修改 2","textChars":6,"textLines":1,"bbox":[46,168,108,12]}
+{"kind":"shape","id":"sh/idonalwv","slide":2,"bbox":[158,166,190,16]}
+{"kind":"textbox","id":"sh/xcf61gva","slide":2,"text":"把专家权重从框架参数树中解耦","textPreview":"把专家权重从框架参数树中解耦","textChars":14,"textLines":1,"bbox":[162,168,182,12]}
+{"kind":"shape","id":"sh/wb658vep","slide":2,"bbox":[348,166,202,16]}
+{"kind":"textbox","id":"sh/mhk3ihcn","slide":2,"text":"dense resident + layer-major expert store","textPreview":"dense resident + layer-major expert store","textChars":41,"textLines":1,"bbox":[352,168,194,12]}
+{"kind":"shape","id":"sh/nid4bmt8","slide":2,"bbox":[550,166,192,16]}
+{"kind":"textbox","id":"sh/ojmlkrut","slide":2,"text":"形成热冷分层，支持后续专家流式访问","textPreview":"形成热冷分层，支持后续专家流式访问","textChars":17,"textLines":1,"bbox":[554,168,184,12]}
+{"kind":"shape","id":"sh/9kvmdwbe","slide":2,"bbox":[42,182,116,16]}
+{"kind":"textbox","id":"sh/edk3ehcr","slide":2,"text":"优化实现 1","textPreview":"优化实现 1","textChars":6,"textLines":1,"bbox":[46,184,108,12]}
+{"kind":"shape","id":"sh/zet47mtc","slide":2,"bbox":[158,182,190,16]}
+{"kind":"textbox","id":"sh/0f2lgruh","slide":2,"text":"显式管理专家读取路径","textPreview":"显式管理专家读取路径","textChars":10,"textLines":1,"bbox":[162,184,182,12]}
+{"kind":"shape","id":"sh/1gbm9cb2","slide":2,"bbox":[348,182,202,16]}
+{"kind":"textbox","id":"sh/qp03axcf","slide":2,"text":"manifest + chunked pread + load path 统计","textPreview":"manifest + chunked pread + load path 统计","textChars":39,"textLines":1,"bbox":[352,184,194,12]}
+{"kind":"shape","id":"sh/rq9k32t0","slide":2,"bbox":[550,182,192,16]}
+{"kind":"textbox","id":"sh/32t0fixw","slide":2,"text":"可分析 cold load、带宽和 miss 成本","textPreview":"可分析 cold load、带宽和 miss 成本","textChars":25,"textLines":1,"bbox":[554,184,184,12]}
+{"kind":"shape","id":"sh/i1kzmdgb","slide":2,"bbox":[42,198,116,16]}
+{"kind":"textbox","id":"sh/54vih8fm","slide":2,"text":"优化实现 2","textPreview":"优化实现 2","textChars":6,"textLines":1,"bbox":[46,200,108,12]}
+{"kind":"shape","id":"sh/432honeh","slide":2,"bbox":[158,198,190,16]}
+{"kind":"textbox","id":"sh/vet0byxk","slide":2,"text":"显式管理专家复用","textPreview":"显式管理专家复用","textChars":8,"textLines":1,"bbox":[162,200,182,12]}
+{"kind":"shape","id":"sh/udkzitgz","slide":2,"bbox":[348,198,202,16]}
+{"kind":"textbox","id":"sh/h0bid8fq","slide":2,"text":"compute-ready hot expert cache","textPreview":"compute-ready hot expert cache","textChars":30,"textLines":1,"bbox":[352,200,194,12]}
+{"kind":"shape","id":"sh/gf2hk3y5","slide":2,"bbox":[550,198,192,16]}
+{"kind":"textbox","id":"sh/7a907yxo","slide":2,"text":"减少重复解包/搬运，提升命中收益","textPreview":"减少重复解包/搬运，提升命中收益","textChars":16,"textLines":1,"bbox":[554,200,184,12]}
+{"kind":"shape","id":"sh/690zetg3","slide":2,"bbox":[42,214,116,16]}
+{"kind":"textbox","id":"sh/c3e5svap","slide":2,"text":"优化实现 3","textPreview":"优化实现 3","textChars":6,"textLines":1,"bbox":[46,216,108,12]}
+{"kind":"shape","id":"sh/x4n610ra","slide":2,"bbox":[158,214,190,16]}
+{"kind":"textbox","id":"sh/a1wnqlsj","slide":2,"text":"拆开 decode 热路径","textPreview":"拆开 decode 热路径","textChars":13,"textLines":1,"bbox":[162,216,182,12]}
+{"kind":"shape","id":"sh/b25ozq94","slide":2,"bbox":[348,214,202,16]}
+{"kind":"textbox","id":"sh/k7ypwfql","slide":2,"text":"route / load / unpack / compute / combine 分段","textPreview":"route / load / unpack / compute / combine 分段","textChars":44,"textLines":1,"bbox":[352,216,194,12]}
+{"kind":"shape","id":"sh/l87650r6","slide":2,"bbox":[550,214,192,16]}
+{"kind":"textbox","id":"sh/y5wnu58v","slide":2,"text":"能直接定位阶段性瓶颈","textPreview":"能直接定位阶段性瓶颈","textChars":10,"textLines":1,"bbox":[554,216,184,12]}
+{"kind":"shape","id":"sh/z65o3a9g","slide":2,"bbox":[42,230,116,16]}
+{"kind":"textbox","id":"sh/gbu5kbah","slide":2,"text":"优化实现 4","textPreview":"优化实现 4","textChars":6,"textLines":1,"bbox":[46,232,108,12]}
+{"kind":"shape","id":"sh/1c36tgr2","slide":2,"bbox":[158,230,190,16]}
+{"kind":"textbox","id":"sh/hsvmxcjq","slide":2,"text":"稳定 prefill/decode 执行行为","textPreview":"稳定 prefill/decode 执行行为","textChars":22,"textLines":1,"bbox":[162,232,182,12]}
+{"kind":"shape","id":"sh/g7mlo725","slide":2,"bbox":[348,230,202,16]}
+{"kind":"textbox","id":"sh/v6d4v210","slide":2,"text":"dense 常驻 UMA + experts 流式调度","textPreview":"dense 常驻 UMA + experts 流式调度","textChars":27,"textLines":1,"bbox":[352,232,194,12]}
+{"kind":"shape","id":"sh/u543mxkf","slide":2,"bbox":[550,230,192,16]}
+{"kind":"textbox","id":"sh/5wfmlcj2","slide":2,"text":"减少无关参数参与热路径，提升吞吐稳定性","textPreview":"减少无关参数参与热路径，提升吞吐稳定性","textChars":19,"textLines":1,"bbox":[554,232,184,12]}
+{"kind":"shape","id":"sh/4vmls72h","slide":2,"bbox":[42,246,116,16]}
+{"kind":"textbox","id":"sh/3ud4z21w","slide":2,"text":"优化实现 5","textPreview":"优化实现 5","textChars":6,"textLines":1,"bbox":[46,248,108,12]}
+{"kind":"shape","id":"sh/it43qhkb","slide":2,"bbox":[158,246,190,16]}
+{"kind":"textbox","id":"sh/d0fmpwjy","slide":2,"text":"把实验代码变成可演进 runtime","textPreview":"把实验代码变成可演进 runtime","textChars":18,"textLines":1,"bbox":[162,248,182,12]}
+{"kind":"shape","id":"sh/sz6lwr2d","slide":2,"bbox":[348,246,202,16]}
+{"kind":"textbox","id":"sh/a50jqt0v","slide":2,"text":"engine / session / service 分层 + profiling hooks","textPreview":"engine / session / service 分层 + profiling hooks","textChars":47,"textLines":1,"bbox":[352,248,194,12]}
+{"kind":"shape","id":"sh/b690jehg","slide":2,"bbox":[550,246,192,16]}
+{"kind":"textbox","id":"sh/w7i1sji1","slide":2,"text":"方便继续做性能分析、策略优化和产品集成","textPreview":"方便继续做性能分析、策略优化和产品集成","textChars":19,"textLines":1,"bbox":[554,248,184,12]}
+{"kind":"shape","id":"sh/x8rilozm","slide":2,"bbox":[796,120,112,42]}
+{"kind":"shape","id":"sh/y90jut07","slide":2,"bbox":[908,120,330,42]}
+{"kind":"textbox","id":"sh/ja90nyhs","slide":2,"text":"Prefill","textPreview":"Prefill","textChars":7,"textLines":1,"bbox":[800,132,104,16]}
+{"kind":"textbox","id":"sh/kbi1w3ix","slide":2,"text":"58 → 130 tok/s","textPreview":"58 → 130 tok/s","textChars":14,"textLines":1,"bbox":[918,126,310,14]}
+{"kind":"textbox","id":"sh/lcrip8zi","slide":2,"text":"512 ctx 约 58 tok/s；64K/128K ctx 分别约 125/130 tok/s，长上下文首响仍慢","textPreview":"512 ctx 约 58 tok/s；64K/128K ctx 分别约 125/130 tok/s，长上下文首响仍慢","textChars":58,"textLines":1,"bbox":[918,140,310,18]}
+{"kind":"shape","id":"sh/6dkjyd03","slide":2,"bbox":[796,174,112,42]}
+{"kind":"shape","id":"sh/7ytkriho","slide":2,"bbox":[908,174,330,42]}
+{"kind":"textbox","id":"sh/rqpwnal4","slide":2,"text":"Decode","textPreview":"Decode","textChars":6,"textLines":1,"bbox":[800,186,104,16]}
+{"kind":"textbox","id":"sh/6pgfu54j","slide":2,"text":"8.15 → 4.2 tok/s","textPreview":"8.15 → 4.2 tok/s","textChars":16,"textLines":1,"bbox":[918,180,310,14]}
+{"kind":"textbox","id":"sh/tsrepk3a","slide":2,"text":"512 ctx 约 8.15 tok/s；64K ctx 约 5.3 tok/s；128K ctx 约 4.2 tok/s","textPreview":"512 ctx 约 8.15 tok/s；64K ctx 约 5.3 tok/s；128K ctx 约 4.2 tok/s","textChars":61,"textLines":1,"bbox":[918,194,310,18]}
+{"kind":"shape","id":"sh/srixwfmp","slide":2,"bbox":[796,228,112,42]}
+{"kind":"shape","id":"sh/fu9gral0","slide":2,"bbox":[908,228,330,42]}
+{"kind":"textbox","id":"sh/et0fyp4f","slide":2,"text":"体验差距","textPreview":"体验差距","textChars":4,"textLines":1,"bbox":[800,240,104,16]}
+{"kind":"textbox","id":"sh/1wrytk36","slide":2,"text":"仍低于产品预期","textPreview":"仍低于产品预期","textChars":7,"textLines":1,"bbox":[918,234,310,14]}
+{"kind":"textbox","id":"sh/0vix0fml","slide":2,"text":"复杂 reasoning、多轮工具、长文档任务下，用户感知瓶颈已从“能不能跑”转向“够不够快、够不够强”","textPreview":"复杂 reasoning、多轮工具、长文档任务下，用户感知瓶颈已从“能不能跑”转向“够不够快、够不够强”","textChars":52,"textLines":1,"bbox":[918,248,310,18]}
+{"kind":"shape","id":"sh/nytgvulc","slide":2,"bbox":[796,282,442,22]}
+{"kind":"textbox","id":"sh/2x0f2p4r","slide":2,"text":"实测说明：后端侧已经被我们优化到“可运行且可量化”，但仍不足以单独承担完整高质量体验。","textPreview":"实测说明：后端侧已经被我们优化到“可运行且可量化”，但仍不足以单独承担完整高质量体验。","textChars":43,"textLines":1,"bbox":[806,286,422,14]}
+{"kind":"shape","id":"sh/kn2xczip","slide":2,"bbox":[28,348,1224,92]}
+{"kind":"shape","id":"sh/lobel4ja","slide":2,"bbox":[28,314,1224,34]}
+{"kind":"textbox","id":"sh/y1kvap0z","slide":2,"text":"代表性实测数据：上下文增大后 decode 明显下降，整体仍达不到高质量体验","textPreview":"代表性实测数据：上下文增大后 decode 明显下降，整体仍达不到高质量体验","textChars":38,"textLines":1,"bbox":[42,321,1196,20]}
+{"kind":"shape","id":"sh/z2twju1k","slide":2,"bbox":[42,362,132,28]}
+{"kind":"textbox","id":"sh/cz2d8fit","slide":2,"text":"Context","textPreview":"Context","textChars":7,"textLines":1,"bbox":[46,369,124,14]}
+{"kind":"shape","id":"sh/x0behkje","slide":2,"bbox":[174,362,144,28]}
+{"kind":"textbox","id":"sh/ax0v6p0n","slide":2,"text":"Prefill TPS","textPreview":"Prefill TPS","textChars":11,"textLines":1,"bbox":[178,369,136,14]}
+{"kind":"shape","id":"sh/bytwfu18","slide":2,"bbox":[318,362,144,28]}
+{"kind":"textbox","id":"sh/ovid4fih","slide":2,"text":"Decode TPS","textPreview":"Decode TPS","textChars":10,"textLines":1,"bbox":[322,369,136,14]}
+{"kind":"shape","id":"sh/pwredkj2","slide":2,"bbox":[462,362,248,28]}
+{"kind":"textbox","id":"sh/2dc7el8v","slide":2,"text":"端侧表现","textPreview":"端侧表现","textChars":4,"textLines":1,"bbox":[466,369,240,14]}
+{"kind":"shape","id":"sh/3el8nq9g","slide":2,"bbox":[710,362,256,28]}
+{"kind":"textbox","id":"sh/ofupgvq1","slide":2,"text":"用户感知","textPreview":"用户感知","textChars":4,"textLines":1,"bbox":[714,369,248,14]}
+{"kind":"shape","id":"sh/pg3qpgrm","slide":2,"bbox":[966,362,258,28]}
+{"kind":"textbox","id":"sh/eps7a18z","slide":2,"text":"结论","textPreview":"结论","textChars":2,"textLines":1,"bbox":[970,369,250,14]}
+{"kind":"shape","id":"sh/fql8j69k","slide":2,"bbox":[42,390,132,16]}
+{"kind":"textbox","id":"sh/gbupcbq5","slide":2,"text":"512","textPreview":"512","textChars":3,"textLines":1,"bbox":[46,392,124,12]}
+{"kind":"shape","id":"sh/1c3qlgrq","slide":2,"bbox":[174,390,144,16]}
+{"kind":"textbox","id":"sh/ylw7m583","slide":2,"text":"58","textPreview":"58","textChars":2,"textLines":1,"bbox":[178,392,136,12]}
+{"kind":"shape","id":"sh/zm58fa9o","slide":2,"bbox":[318,390,144,16]}
+{"kind":"textbox","id":"sh/tcr21of2","slide":2,"text":"8.15","textPreview":"8.15","textChars":4,"textLines":1,"bbox":[322,392,136,12]}
+{"kind":"shape","id":"sh/8ri183eh","slide":2,"bbox":[462,390,248,16]}
+{"kind":"textbox","id":"sh/7q9kzyxc","slide":2,"text":"短上下文也未达到产品可接受甜点区","textPreview":"短上下文也未达到产品可接受甜点区","textChars":16,"textLines":1,"bbox":[466,392,240,12]}
+{"kind":"shape","id":"sh/mp0j6twr","slide":2,"bbox":[710,390,256,16]}
+{"kind":"textbox","id":"sh/lor2xof6","slide":2,"text":"首响和回复都偏慢","textPreview":"首响和回复都偏慢","textChars":8,"textLines":1,"bbox":[714,392,248,12]}
+{"kind":"shape","id":"sh/kni14jel","slide":2,"bbox":[966,390,258,16]}
+{"kind":"textbox","id":"sh/zm90vex0","slide":2,"text":"说明当前版本已能跑通，但短上下文体验仍不够强","textPreview":"说明当前版本已能跑通，但短上下文体验仍不够强","textChars":22,"textLines":1,"bbox":[970,392,250,12]}
+{"kind":"shape","id":"sh/ylgj29wf","slide":2,"bbox":[42,406,132,16]}
+{"kind":"textbox","id":"sh/5kb298fa","slide":2,"text":"64K","textPreview":"64K","textChars":3,"textLines":1,"bbox":[46,408,124,12]}
+{"kind":"shape","id":"sh/4j210nep","slide":2,"bbox":[174,406,144,16]}
+{"kind":"textbox","id":"sh/onalcrm1","slide":2,"text":"125","textPreview":"125","textChars":3,"textLines":1,"bbox":[178,408,136,12]}
+{"kind":"shape","id":"sh/pojm5w3m","slide":2,"bbox":[318,406,144,16]}
+{"kind":"textbox","id":"sh/2ls3ah4v","slide":2,"text":"5.3","textPreview":"5.3","textChars":3,"textLines":1,"bbox":[322,408,136,12]}
+{"kind":"shape","id":"sh/3m143mlg","slide":2,"bbox":[462,406,248,16]}
+{"kind":"textbox","id":"sh/gjal87mp","slide":2,"text":"prefill 提升，但 decode 明显被长上下文拖慢","textPreview":"prefill 提升，但 decode 明显被长上下文拖慢","textChars":29,"textLines":1,"bbox":[466,408,240,12]}
+{"kind":"shape","id":"sh/1kjm1c3a","slide":2,"bbox":[710,406,256,16]}
+{"kind":"textbox","id":"sh/ex836h4z","slide":2,"text":"长文档回复等待感强","textPreview":"长文档回复等待感强","textChars":9,"textLines":1,"bbox":[714,408,248,12]}
+{"kind":"shape","id":"sh/fy14z2lk","slide":2,"bbox":[966,406,258,16]}
+{"kind":"textbox","id":"sh/svql47mt","slide":2,"text":"长上下文场景下，用户体验已明显落后于云端预期","textPreview":"长上下文场景下，用户体验已明显落后于云端预期","textChars":22,"textLines":1,"bbox":[970,408,250,12]}
+{"kind":"shape","id":"sh/twzmxcne","slide":2,"bbox":[42,422,132,16]}
+{"kind":"textbox","id":"sh/vqx472p0","slide":2,"text":"128K","textPreview":"128K","textChars":4,"textLines":1,"bbox":[46,424,124,12]}
+{"kind":"shape","id":"sh/uponexov","slide":2,"bbox":[174,422,144,16]}
+{"kind":"textbox","id":"sh/hszm9c76","slide":2,"text":"130","textPreview":"130","textChars":3,"textLines":1,"bbox":[178,424,136,12]}
+{"kind":"shape","id":"sh/wrq5g76l","slide":2,"bbox":[318,422,144,16]}
+{"kind":"textbox","id":"sh/juh4b2pc","slide":2,"text":"4.2","textPreview":"4.2","textChars":3,"textLines":1,"bbox":[322,424,136,12]}
+{"kind":"shape","id":"sh/it8nixor","slide":2,"bbox":[462,422,248,16]}
+{"kind":"textbox","id":"sh/5wzmdc7i","slide":2,"text":"prefill 基本见顶，decode 进一步下探","textPreview":"prefill 基本见顶，decode 进一步下探","textChars":25,"textLines":1,"bbox":[466,424,240,12]}
+{"kind":"shape","id":"sh/4vq5k76x","slide":2,"bbox":[710,422,256,16]}
+{"kind":"textbox","id":"sh/ri14fmp8","slide":2,"text":"复杂任务和长文档体感更差","textPreview":"复杂任务和长文档体感更差","textChars":12,"textLines":1,"bbox":[714,424,248,12]}
+{"kind":"shape","id":"sh/6h8nmhon","slide":2,"bbox":[966,422,258,16]}
+{"kind":"textbox","id":"sh/qd0fyp0b","slide":2,"text":"真正缺的是模型能力与 tail latency，不只是后端实现","textPreview":"真正缺的是模型能力与 tail latency，不只是后端实现","textChars":31,"textLines":1,"bbox":[970,424,250,12]}
+{"kind":"shape","id":"sh/be9g7u1w","slide":2,"bbox":[28,490,392,90]}
+{"kind":"shape","id":"sh/cf2x0fih","slide":2,"bbox":[28,456,392,34]}
+{"kind":"textbox","id":"sh/d0by9kjm","slide":2,"text":"离用户体验还差什么","textPreview":"离用户体验还差什么","textChars":9,"textLines":1,"bbox":[42,463,364,20]}
+{"kind":"shape","id":"sh/y1kf2p07","slide":2,"bbox":[444,490,392,90]}
+{"kind":"shape","id":"sh/z2tgbuhs","slide":2,"bbox":[444,456,392,34]}
+{"kind":"textbox","id":"sh/032h4zid","slide":2,"text":"为什么必须补齐云端模型","textPreview":"为什么必须补齐云端模型","textChars":11,"textLines":1,"bbox":[458,463,364,20]}
+{"kind":"shape","id":"sh/l4byd4zy","slide":2,"bbox":[860,490,392,90]}
+{"kind":"shape","id":"sh/e5gfq503","slide":2,"bbox":[860,456,392,34]}
+{"kind":"textbox","id":"sh/f6pgza1o","slide":2,"text":"推荐的产品形态","textPreview":"推荐的产品形态","textChars":7,"textLines":1,"bbox":[874,463,364,20]}
+{"kind":"textbox","id":"sh/h0fi58j6","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,504,16,18.3]}
+{"kind":"textbox","id":"sh/wz61w32l","slide":2,"text":"复杂 reasoning 依赖更强模型能力，而不是仅仅更好的 cache policy。","textPreview":"复杂 reasoning 依赖更强模型能力，而不是仅仅更好的 cache policy。","textChars":44,"textLines":1,"bbox":[60,504,348,20.3]}
+{"kind":"textbox","id":"sh/vyx03yl0","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[44,530,16,18.3]}
+{"kind":"textbox","id":"sh/ax4jutkf","slide":2,"text":"长上下文、多工具、多文档任务下，tail latency 与完成质量仍落后于用户预期。","textPreview":"长上下文、多工具、多文档任务下，tail latency 与完成质量仍落后于用户预期。","textChars":43,"textLines":1,"bbox":[60,530,348,20.3]}
+{"kind":"textbox","id":"sh/54fi98j2","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,504,16,18.3]}
+{"kind":"textbox","id":"sh/4361032h","slide":2,"text":"端侧负责低延迟、隐私和会话连续性。","textPreview":"端侧负责低延迟、隐私和会话连续性。","textChars":17,"textLines":1,"bbox":[476,504,348,20.3]}
+{"kind":"textbox","id":"sh/j2x07i1c","slide":2,"text":"•","textPreview":"•","textChars":1,"textLines":1,"bbox":[460,530,16,18.3]}
+{"kind":"textbox","id":"sh/i1ojydkr","slide":2,"text":"云端负责高质量 reasoning、长上下文和复杂工具链。","textPreview":"云端负责高质量 reasoning、长上下文和复杂工具链。","textChars":29,"textLines":1,"bbox":[476,530,348,20.3]}
+{"kind":"textbox","id":"sh/l8vixo3y","slide":2,"text":"最合理的形态不是“端侧替代云端”，而是 device-first + cloud-assisted：本地给首响与连续性，云端补能力上限。","textPreview":"最合理的形态不是“端侧替代云端”，而是 device-first + cloud-assisted：本地给首响与连续性，云端补能力上限。","textChars":68,"textLines":1,"bbox":[876,504,360,44]}
+{"kind":"shape","id":"sh/07m1oj2d","slide":2,"bbox":[28,582,1224,72]}
+{"kind":"textbox","id":"sh/cb61kja9","slide":2,"text":"核心结论：我们已经把 GB10 端侧后端优化到“能跑、能测、能迭代”的阶段，但当前实测仅约为：512 ctx prefill/decode = 58 / 8.15 tok/s，64K ctx = 125 / 5.3 tok/s，128K ctx = 130 / 4.2 tok/s。真正限制用户体验的，已经不只是后端实现，而是模型能力、长上下文质量和复杂任务 tail latency。因此下一步必须用云端模型补齐体验上限。","textPreview":"核心结论：我们已经把 GB10 端侧后端优化到“能跑、能测、能迭代”的阶段，但当前实测仅约为：512 ctx prefill/decode = 58 / 8.15 tok/s，64K ctx = 125 / 5.3 tok/s，128K ctx = 130 / 4.2 to...","textChars":212,"textLines":1,"bbox":[44,596,1188,22]}
+{"kind":"shape","id":"sh/dczidobu","slide":2,"bbox":[28,670,1224,34]}
+{"kind":"textbox","id":"sh/q9oji9s3","slide":2,"text":"Takeaway：GB10 端侧优化解决的是“本地可运行性”，云端模型补齐的是“高质量体验上限”；后续重点应转向端云协同，而不是继续单点堆本地后端优化。","textPreview":"Takeaway：GB10 端侧优化解决的是“本地可运行性”，云端模型补齐的是“高质量体验上限”；后续重点应转向端云协同，而不是继续单点堆本地后端优化。","textChars":76,"textLines":1,"bbox":[42,677,1192,18]}
+{"kind":"notes","id":"nt/21nvb1","slide":2,"text":""}
